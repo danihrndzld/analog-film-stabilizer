@@ -167,11 +167,14 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
     target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
 
-    # Reject outliers: detections farther than 3×MAD from the median are treated as missed
+    # Reject outliers: detections farther than 5×MAD from the median are treated as missed.
+    # 5× is intentionally generous — real scanner jitter can be large; we only want to
+    # discard clear false positives (e.g. bright spots on the film content detected instead
+    # of the perforation), which tend to be dramatically far from the median.
     mad_x = float(np.median([abs(p[0] - target_x) for p in valid])) or 1.0
     mad_y = float(np.median([abs(p[1] - target_y) for p in valid])) or 1.0
-    outlier_thresh_x = max(3.0 * mad_x, 30.0)
-    outlier_thresh_y = max(3.0 * mad_y, 30.0)
+    outlier_thresh_x = max(5.0 * mad_x, 80.0)
+    outlier_thresh_y = max(5.0 * mad_y, 80.0)
     cleaned = [
         p if (p is not None
               and abs(p[0] - target_x) <= outlier_thresh_x
