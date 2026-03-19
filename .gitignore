@@ -34,5 +34,10 @@ __pycache__/
 venv/
 *.egg-info/
 
+# PyInstaller
+build/
+dist/
+*.spec
+
 # macOS
 .DS_Store

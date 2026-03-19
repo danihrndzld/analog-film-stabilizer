@@ -13,11 +13,12 @@ def ensure_package(pkg_name, import_name=None):
     if importlib.util.find_spec(import_name) is None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name])
 
-try:
-    ensure_package("opencv-python", "cv2")
-    ensure_package("numpy")
-except Exception as e:
-    print("No pude instalar dependencias automáticamente:", e)
+if not getattr(sys, "frozen", False):
+    try:
+        ensure_package("opencv-python", "cv2")
+        ensure_package("numpy")
+    except Exception as e:
+        print("No pude instalar dependencias automáticamente:", e)
 
 import cv2
 import numpy as np
@@ -27,7 +28,8 @@ from tkinter import filedialog, messagebox, ttk
 # Drag & drop support (optional)
 DND_OK = False
 try:
-    ensure_package("tkinterdnd2")
+    if not getattr(sys, "frozen", False):
+        ensure_package("tkinterdnd2")
     from tkinterdnd2 import DND_FILES, TkinterDnD
     DND_OK = True
 except Exception:
@@ -412,7 +414,13 @@ class PickerApp(AppBase):
 
 
 def main():
-    app = DragDropApp() if DND_OK else PickerApp()
+    if DND_OK:
+        try:
+            app = DragDropApp()
+        except Exception:
+            app = PickerApp()
+    else:
+        app = PickerApp()
     app.root.mainloop()
 
 
