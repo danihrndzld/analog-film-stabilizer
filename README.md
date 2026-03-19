@@ -13,15 +13,28 @@ Qué hace:
 - Fija la perforación en una posición constante en toda la secuencia
 - Guarda todo en una carpeta nueva automáticamente
 
-Si macOS bloquea el launcher:
-1. Clic derecho sobre Perforation_Stabilizer.command
-2. Open / Abrir
-3. Confirmar
+macOS Gatekeeper — primera vez que abres la app:
+macOS bloquea apps que no vienen de la App Store. Esto es normal y se resuelve una sola vez:
 
-Si no abre por permisos, en Terminal:
+  Opción A (más fácil):
+  1. Clic derecho sobre "Perforation Stabilizer.app"
+  2. Seleccionar "Abrir" (Open)
+  3. En el aviso que aparece, hacer clic en "Abrir" de nuevo
+  → A partir de ahí se abre normal con doble clic
+
+  Opción B (si la Opción A no funciona):
+  1. Ir a Ajustes del Sistema → Privacidad y Seguridad
+  2. Bajar hasta ver el mensaje sobre la app bloqueada
+  3. Hacer clic en "Abrir de todas formas"
+
+  Opción C (Terminal):
+  xattr -cr "/ruta/a/Perforation Stabilizer.app"
+  → Esto elimina los atributos de cuarentena de macOS
+
+Si no abre por permisos en el launcher .command (versión sin empaquetar):
 chmod +x /ruta/al/archivo/Perforation_Stabilizer.command
 
-Dependencias:
+Dependencias (solo versión .command, no la .app empaquetada):
 El script intenta instalar automáticamente:
 - opencv-python
 - numpy
