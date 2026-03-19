@@ -162,14 +162,45 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
     if not valid:
         raise RuntimeError("No logré detectar la perforación en ningún frame.")
 
-    smoothed = moving_average(points, radius=smooth_radius)
-    target_x = float(np.median([p[0] for p in smoothed]))
-    target_y = float(np.median([p[1] for p in smoothed]))
+    # Compute robust target from all valid detections (ignore smoothing for the anchor)
+    target_x = float(np.median([p[0] for p in valid]))
+    target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
+
+    # Reject outliers: detections farther than 3×MAD from the median are treated as missed
+    mad_x = float(np.median([abs(p[0] - target_x) for p in valid])) or 1.0
+    mad_y = float(np.median([abs(p[1] - target_y) for p in valid])) or 1.0
+    outlier_thresh_x = max(3.0 * mad_x, 30.0)
+    outlier_thresh_y = max(3.0 * mad_y, 30.0)
+    cleaned = [
+        p if (p is not None
+              and abs(p[0] - target_x) <= outlier_thresh_x
+              and abs(p[1] - target_y) <= outlier_thresh_y)
+        else None
+        for p in points
+    ]
+    n_outliers = sum(1 for o, p in zip(cleaned, points) if o is None and p is not None)
+    if n_outliers:
+        log(f"Outliers descartados: {n_outliers}")
+
+    # Fill None/outlier positions by linear interpolation (no smoothing — track real jitter)
+    xs = np.array([p[0] if p is not None else np.nan for p in cleaned], dtype=np.float32)
+    ys = np.array([p[1] if p is not None else np.nan for p in cleaned], dtype=np.float32)
+    idx = np.arange(len(xs))
+    good_x = np.isfinite(xs); good_y = np.isfinite(ys)
+    if np.any(good_x): xs[~good_x] = np.interp(idx[~good_x], idx[good_x], xs[good_x])
+    if np.any(good_y): ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
+    per_frame = list(zip(xs.tolist(), ys.tolist()))
+
+    shifts = [(target_x - pt[0], target_y - pt[1]) for pt in per_frame]
+    crop_left   = int(np.ceil(max(max(dx, 0) for dx, dy in shifts)))
+    crop_right  = int(np.ceil(max(max(-dx, 0) for dx, dy in shifts)))
+    crop_top    = int(np.ceil(max(max(dy, 0) for dx, dy in shifts)))
+    crop_bottom = int(np.ceil(max(max(-dy, 0) for dx, dy in shifts)))
+    log(f"Crop aplicado — L:{crop_left} R:{crop_right} T:{crop_top} B:{crop_bottom}")
     log("Segunda pasada: estabilizando y guardando...")
 
-    max_dx = 0.0
-    max_dy = 0.0
+    out_w = out_h = None
 
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
@@ -177,11 +208,9 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
             log(f"No pude abrir en segunda pasada: {os.path.basename(f)}")
         else:
             h, w = frame.shape[:2]
-            pt = smoothed[i - 1]
+            pt = per_frame[i - 1]
             dx = target_x - pt[0]
             dy = target_y - pt[1]
-            max_dx = max(max_dx, abs(dx))
-            max_dy = max(max_dy, abs(dy))
 
             M = np.float32([[1, 0, dx], [0, 1, dy]])
             stabilized = cv2.warpAffine(
@@ -192,6 +221,9 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=(0, 0, 0),
             )
+            stabilized = stabilized[crop_top:h - crop_bottom, crop_left:w - crop_right]
+            if out_h is None:
+                out_h, out_w = stabilized.shape[:2]
 
             out_path = os.path.join(output_dir, os.path.basename(f))
             cv2.imwrite(out_path, stabilized)
@@ -203,10 +235,12 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
         "failed_detections": failures,
         "target_x": round(target_x, 3),
         "target_y": round(target_y, 3),
-        "max_dx": round(max_dx, 3),
-        "max_dy": round(max_dy, 3),
-        "suggested_safe_crop_left_right": int(np.ceil(max_dx)),
-        "suggested_safe_crop_top_bottom": int(np.ceil(max_dy)),
+        "output_width": out_w,
+        "output_height": out_h,
+        "applied_crop_left": crop_left,
+        "applied_crop_right": crop_right,
+        "applied_crop_top": crop_top,
+        "applied_crop_bottom": crop_bottom,
     }
 
     with open(os.path.join(output_dir, "stabilization_report.txt"), "w", encoding="utf-8") as f:
@@ -218,8 +252,7 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
     log("Listo.")
     log(f"Frames: {summary['total_frames']}")
     log(f"Sin detección: {summary['failed_detections']}")
-    log(f"Crop seguro sugerido L/R: {summary['suggested_safe_crop_left_right']} px")
-    log(f"Crop seguro sugerido T/B: {summary['suggested_safe_crop_top_bottom']} px")
+    log(f"Tamaño de salida: {out_w}×{out_h} px")
     return summary
 
 

@@ -45,13 +45,22 @@ Si la función de arrastrar carpeta no aparece, igual puedes usar el botón "Ele
 Ajustes recomendados para tus frames:
 - ROI izq.: 0.22
 - Threshold: 210
-- Suavizado: 9
+- Suavizado: 9 (ya no afecta la corrección por frame, solo es referencia)
 
 Si notas que no detecta bien la perforación:
 - baja Threshold a 200 o 195
 - si detecta cosas raras, sube Threshold a 215
 - si quieres que busque más pegado a la izquierda, baja ROI a 0.18 o 0.20
 
+Cómo funciona la estabilización:
+1. Primera pasada: detecta la posición de la perforación en cada frame
+2. Calcula la mediana de todas las posiciones como punto fijo destino
+3. Rechaza detecciones atípicas (outliers) e interpola esos frames desde los vecinos
+4. Segunda pasada: traslada cada frame para que su perforación quede exactamente en el punto fijo
+5. Recorta los bordes negros automáticamente — todos los frames de salida tienen el mismo tamaño y sin bordes
+
 Salida:
 La carpeta de salida se crea junto a la carpeta original con el sufijo _ESTABILIZADO.
-También se genera un archivo stabilization_report.txt con resumen del proceso.
+Los frames de salida son más pequeños que los originales (el recorte elimina los bordes negros).
+También se genera un archivo stabilization_report.txt con: total de frames, detecciones fallidas,
+coordenadas del punto fijo, dimensiones de salida y valores de recorte aplicados.

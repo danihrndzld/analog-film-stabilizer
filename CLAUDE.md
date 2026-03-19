@@ -17,19 +17,42 @@ If the launcher is blocked by macOS:
 chmod +x src/Perforation_Stabilizer.command
 ```
 
+## Client Requirements (Diego Fabriccio)
+
+The client scans analog film (3500–3800 frames per folder) and currently stabilizes the sequence manually in DaVinci Resolve by tracking a reference point on the film perforation. He wants this fully automated:
+
+- **Drag-and-drop a folder** of frames — no manual per-frame work
+- **Mark the search area** once (or let the app auto-detect it) — the user selects where the perforation is, not every frame
+- The app locks that reference point to a **fixed pixel position** across all frames
+- Output is a stabilized image sequence ready to be assembled into video
+
+The key workflow analogy: "I select the lower-right corner of the perforation in DaVinci and it finds that in all photos and keeps that point fixed." The app should replicate this automatically.
+
+**Scale consideration:** batches are 3500–3800 JPEGs. Performance and memory efficiency matter.
+
 ## Architecture
 
 Single-file Tkinter GUI app (`src/perforation_stabilizer_app.py`) with two processing passes:
 
-1. **Detection pass** — `detect_perforation()` crops a left-side ROI (default 22% of frame width), thresholds to white, finds contours, and scores candidates by area + fill ratio to locate the film perforation hole.
-2. **Stabilization pass** — `stabilize_folder()` applies `moving_average()` to smooth perforation positions across all frames, then translates each frame so the perforation lands at a fixed anchor point, cropping to the smallest common canvas.
+1. **Detection pass** — `detect_perforation()` crops a left-side ROI (default 22% of frame width), applies Gaussian blur + binary threshold, morphological open/close, then scores contours by area + fill ratio. Filters: area ≥ 5000 px, aspect ratio 0.40–1.20, fill ≥ 0.75, centroid within 70% of ROI width. Returns centroid of the best candidate.
+2. **Stabilization pass** — `stabilize_folder()` applies `moving_average()` (uniform kernel, NaN-filled via linear interpolation for missed frames) to smooth positions, uses the **median** of smoothed points as the fixed anchor, then translates each frame with `cv2.warpAffine`. Before the second-pass loop, all shifts are pre-computed and used to derive a symmetric crop (`crop_left/right/top/bottom`) that removes every black border across the whole batch. Output frames are smaller than input by those amounts and have no black borders.
 
 Key parameters exposed in the UI:
-- **ROI left** (`roi_ratio`): fraction of frame width to search — default `0.22`
+- **ROI izq.** (`roi_ratio`): fraction of frame width to search — default `0.22`
 - **Threshold**: brightness cutoff for binarization — default `210` (lower if missing detections, raise if false positives)
-- **Smoothing radius**: moving average window half-size — default `9`
+- **Suavizado** (`smooth_radius`): moving average window half-size — default `9`
 
-Output is written to a sibling folder suffixed `_ESTABILIZADO`, plus a `stabilization_report.txt`.
+### UI classes
+- `DragDropApp` — used when `tkinterdnd2` loads successfully; adds a drag-and-drop target zone.
+- `PickerApp` — fallback when DnD is unavailable; uses file-picker buttons only.
+- Both inherit `AppBase` which owns `run_process()`, `log()`, `set_progress()`, `_finish()`, `_error()`.
+
+Processing runs in a daemon thread; all UI updates go through `root.after()`.
+
+### CI / Build
+`.github/workflows/build.yml` builds a macOS `.app` bundle on every push to `main` and on version tags (`v*`) using PyInstaller (`--windowed --onedir`). Artifacts are uploaded for 30 days; tagged builds create a GitHub Release with the zip attached.
+
+Output is written to a sibling folder suffixed `_ESTABILIZADO`, plus a `stabilization_report.txt` with frame count, failed detections, anchor coords, output dimensions, and applied crop values (left/right/top/bottom px).
 
 ## Media
 

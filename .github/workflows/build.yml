@@ -26,6 +26,9 @@ jobs:
           pyinstaller \
             --windowed \
             --onedir \
+            --collect-all cv2 \
+            --collect-all numpy \
+            --collect-all tkinterdnd2 \
             --hidden-import=tkinterdnd2 \
             --name "Perforation Stabilizer" \
             src/perforation_stabilizer_app.py
