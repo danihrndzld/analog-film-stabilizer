@@ -1,0 +1,32 @@
+{
+  "name": "perforation-stabilizer",
+  "version": "1.0.0",
+  "description": "Film perforation stabilizer for analog scan sequences",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.0"
+  },
+  "build": {
+    "appId": "com.fabriccio.perforation-stabilizer",
+    "productName": "Perforation Stabilizer",
+    "directories": {
+      "output": "../dist"
+    },
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }]
+    },
+    "extraResources": [
+      {
+        "from": "../src",
+        "to": "src",
+        "filter": ["*.py"]
+      }
+    ]
+  }
+}

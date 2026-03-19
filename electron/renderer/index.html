@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline';">
+  <title>Perforation Stabilizer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+
+    <!-- ── Header ─────────────────────────────────────────────────────── -->
+    <header class="app-header" aria-label="Barra de aplicación">
+      <span class="app-title">Perforation Stabilizer</span>
+      <span class="app-badge" aria-label="Versión 1.0">v1.0</span>
+    </header>
+
+    <!-- ── Main ───────────────────────────────────────────────────────── -->
+    <main class="app-main">
+
+      <!-- Drop Zone: designed as a film frame with sprocket holes -->
+      <div
+        class="drop-zone"
+        id="dropZone"
+        role="button"
+        tabindex="0"
+        aria-label="Zona de arrastre. Suelta una carpeta aquí o pulsa Intro para elegir"
+        aria-dropeffect="copy"
+      >
+        <!-- Left sprockets -->
+        <div class="sprockets" aria-hidden="true">
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+        </div>
+
+        <!-- Frame content -->
+        <div class="drop-frame">
+
+          <!-- Idle / drag-over state -->
+          <div class="drop-content" id="dropContent">
+            <svg class="drop-icon" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true">
+              <!-- Folder shape -->
+              <path d="M2 8a2 2 0 0 1 2-2h4.17a2 2 0 0 1 1.42.59L11 8h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8z"/>
+              <!-- Down arrow -->
+              <path d="M12 11v5m0 0-2-2m2 2 2-2"/>
+            </svg>
+            <p class="drop-primary">Arrastra tu carpeta aquí</p>
+            <p class="drop-secondary">o pulsa <kbd>Intro</kbd> para elegir</p>
+          </div>
+
+          <!-- Loaded state -->
+          <div class="drop-loaded" id="dropLoaded" hidden aria-live="polite">
+            <svg class="drop-icon drop-icon--loaded" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            <p class="drop-folder-name" id="dropFolderName"></p>
+            <p class="drop-secondary">carpeta seleccionada</p>
+            <p class="drop-change-hint">Haz click o arrastra para cambiar</p>
+          </div>
+
+        </div>
+
+        <!-- Right sprockets -->
+        <div class="sprockets" aria-hidden="true">
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+          <div class="sprocket"></div>
+        </div>
+      </div>
+
+      <!-- Path fields -->
+      <div class="path-section" role="group" aria-label="Rutas de carpetas">
+        <div class="path-row">
+          <label class="path-label" for="inputPath">Entrada</label>
+          <input
+            class="path-input"
+            id="inputPath"
+            type="text"
+            placeholder="Selecciona o arrastra una carpeta de frames"
+            aria-label="Ruta de entrada"
+            spellcheck="false"
+            autocomplete="off"
+          >
+          <button class="btn-secondary" id="browseInput" type="button">Elegir</button>
+        </div>
+        <div class="path-row">
+          <label class="path-label" for="outputPath">Salida</label>
+          <input
+            class="path-input"
+            id="outputPath"
+            type="text"
+            placeholder="(se genera automáticamente al elegir entrada)"
+            aria-label="Ruta de salida"
+            spellcheck="false"
+            autocomplete="off"
+          >
+          <button class="btn-secondary" id="browseOutput" type="button">Elegir</button>
+        </div>
+      </div>
+
+      <!-- Advanced params -->
+      <details class="params-section" id="paramsSection">
+        <summary class="params-toggle" aria-expanded="false">
+          Parámetros avanzados
+          <svg class="params-chevron" viewBox="0 0 16 16" fill="none"
+               stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+               aria-hidden="true">
+            <polyline points="4 6 8 10 12 6"/>
+          </svg>
+        </summary>
+        <div class="params-body">
+          <div class="params-grid">
+            <div class="param-field">
+              <label class="param-label" for="paramRoi">ROI izquierda</label>
+              <input class="param-input" id="paramRoi"
+                     type="number" value="0.22" step="0.01" min="0.05" max="0.5"
+                     aria-describedby="roiHint">
+              <span class="param-hint" id="roiHint">fracción del ancho</span>
+            </div>
+            <div class="param-field">
+              <label class="param-label" for="paramThreshold">Umbral</label>
+              <input class="param-input" id="paramThreshold"
+                     type="number" value="210" step="1" min="50" max="255"
+                     aria-describedby="thresholdHint">
+              <span class="param-hint" id="thresholdHint">brillo 0–255</span>
+            </div>
+            <div class="param-field">
+              <label class="param-label" for="paramSmooth">Suavizado</label>
+              <input class="param-input" id="paramSmooth"
+                     type="number" value="9" step="1" min="1" max="50"
+                     aria-describedby="smoothHint">
+              <span class="param-hint" id="smoothHint">radio del promedio</span>
+            </div>
+            <div class="param-field">
+              <label class="param-label" for="paramQuality">Calidad JPEG</label>
+              <input class="param-input" id="paramQuality"
+                     type="number" value="95" step="1" min="0" max="100"
+                     aria-describedby="qualityHint">
+              <span class="param-hint" id="qualityHint">1–100 · 0 = PNG</span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Action button -->
+      <div class="action-row">
+        <button
+          class="btn-run"
+          id="runBtn"
+          type="button"
+          disabled
+          aria-disabled="true"
+        >
+          Estabilizar secuencia
+        </button>
+      </div>
+
+      <!-- Progress bar (hidden when idle) -->
+      <div class="progress-row" id="progressRow" hidden aria-hidden="true">
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressBar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <span class="progress-pct" id="progressPct" aria-live="polite">0%</span>
+      </div>
+
+      <!-- Log panel: role="log" on the inner div already implies aria-live="polite"
+           + aria-relevant="additions" — no need to duplicate on the section -->
+      <section class="log-panel" aria-label="Registro del proceso">
+        <div class="log-empty" id="logEmpty" aria-hidden="true">
+          El registro aparecerá aquí una vez iniciado el proceso
+        </div>
+        <div class="log-lines" id="logLines" role="log"></div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

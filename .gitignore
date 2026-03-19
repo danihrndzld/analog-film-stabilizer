@@ -41,3 +41,7 @@ dist/
 
 # macOS
 .DS_Store
+
+# Electron / Node
+electron/node_modules/
+dist/

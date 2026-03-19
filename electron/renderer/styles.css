@@ -1,0 +1,603 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Perforation Stabilizer — UI
+   Aesthetic: warm dark "restoration lab" — not generic dark mode.
+   Accent: amber (celuloide reference). No gradients. No card shadows.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* Surfaces — warm-tinted near-black, not cold gray */
+  --bg:           oklch(10%  0.010 65);
+  --surface:      oklch(14%  0.012 65);
+  --surface-2:    oklch(18%  0.014 65);
+  --border:       oklch(24%  0.012 65);
+  --border-focus: oklch(36%  0.012 65);
+
+  /* Text */
+  --text:         oklch(87%  0.010 75);
+  --text-muted:   oklch(52%  0.015 72);
+  --text-faint:   oklch(38%  0.010 65);   /* raised: was 32%, needed for A3 contrast */
+
+  /* Accent — amber, celuloide hue */
+  --amber:        oklch(74%  0.14  68);
+  --amber-lo:     oklch(74%  0.14  68 / 0.09);
+  --amber-mid:    oklch(74%  0.14  68 / 0.22);
+
+  /* State colors */
+  --green:        oklch(68%  0.15 145);
+  --green-lo:     oklch(68%  0.15 145 / 0.08);
+  --red:          oklch(63%  0.17  25);
+  --red-lo:       oklch(63%  0.17  25 / 0.08);
+
+  /* Typography */
+  --font-ui:   -apple-system, 'Helvetica Neue', 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Menlo', 'Consolas', monospace;
+
+  --radius: 5px;
+
+  /* Button text on colored backgrounds — M3: extracted from literals */
+  --btn-text-on-amber: oklch(12%  0.005 65);
+  --btn-text-on-red:   oklch(94%  0.005 65);
+
+  /* Easing */
+  --ease-out: cubic-bezier(0.25, 1, 0.5, 1);   /* ease-out-quart equivalent */
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── App shell ────────────────────────────────────────────────────────────── */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 20px 11px 80px;   /* 80px left for macOS traffic lights */
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  /* Make the header draggable so the window can be moved */
+  -webkit-app-region: drag;
+}
+
+.app-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.app-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  letter-spacing: 0.05em;
+}
+
+/* ── Main scroll area ─────────────────────────────────────────────────────── */
+
+.app-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 16px;
+  overflow-y: auto;
+}
+
+/* ── Drop Zone ────────────────────────────────────────────────────────────── */
+/*    Looks like a film frame: sprocket holes left & right, frame content
+      in the middle. States: idle, is-over, is-loaded, is-error               */
+
+.drop-zone {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  transition: border-color 0.18s var(--ease-out), background 0.18s var(--ease-out);
+  min-height: 158px;
+  flex-shrink: 0;
+}
+
+.drop-zone:focus-visible {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 3px var(--amber-mid);
+}
+
+.drop-zone.is-over {
+  border-color: var(--amber);
+  background: var(--amber-lo);
+}
+
+.drop-zone.is-loaded {
+  border-color: var(--green);
+  background: var(--green-lo);
+}
+
+.drop-zone.is-error {
+  border-color: var(--red);
+  background: var(--red-lo);
+}
+
+/* Sprocket column */
+.sprockets {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  align-items: center;
+  width: 26px;
+  flex-shrink: 0;
+  padding: 14px 0;
+  border-right: 1px solid var(--border);
+  transition: border-color 0.18s ease;
+}
+
+.sprockets + .drop-frame + .sprockets {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+.drop-zone.is-over .sprockets,
+.drop-zone:focus-visible .sprockets { border-color: var(--amber); }
+.drop-zone.is-loaded .sprockets     { border-color: var(--green); }
+.drop-zone.is-error .sprockets      { border-color: var(--red);   }
+
+/* Individual sprocket hole — rectangular with rounded corners (35mm reference) */
+.sprocket {
+  width: 10px;
+  height: 14px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.drop-zone.is-over .sprocket,
+.drop-zone:focus-visible .sprocket {
+  border-color: var(--amber);
+  background: var(--amber-lo);
+}
+
+.drop-zone.is-loaded .sprocket {
+  border-color: var(--green);
+  background: var(--green-lo);
+}
+
+/* The "film frame" region between the sprockets */
+.drop-frame {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 24px;
+}
+
+/* Idle content */
+.drop-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.drop-icon {
+  width: 30px;
+  height: 30px;
+  color: var(--text-faint);
+  transition: color 0.18s ease;
+  flex-shrink: 0;
+}
+
+.drop-icon--loaded {
+  color: var(--green);
+}
+
+.drop-zone.is-over .drop-icon   { color: var(--amber); }
+.drop-zone.is-error .drop-icon  { color: var(--red);   }
+
+.drop-primary {
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.drop-secondary {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.drop-secondary kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-focus);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--text-muted);
+}
+
+/* Loaded state content */
+.drop-loaded {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.drop-folder-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--green);
+  word-break: break-all;
+  max-width: 100%;
+}
+
+.drop-change-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+/* ── Path section ─────────────────────────────────────────────────────────── */
+
+.path-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.path-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.path-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  width: 52px;
+  flex-shrink: 0;
+}
+
+.path-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.path-input:focus {
+  border-color: var(--amber);
+}
+
+.path-input::placeholder {
+  color: var(--text-faint);
+}
+
+/* ── Secondary button (Browse) ────────────────────────────────────────────── */
+
+.btn-secondary {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 7px 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  outline: none;
+  transition: color 0.13s, border-color 0.13s;
+}
+
+.btn-secondary:hover {
+  color: var(--text);
+  border-color: var(--border-focus);
+}
+
+.btn-secondary:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+/* ── Advanced params ──────────────────────────────────────────────────────── */
+
+.params-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.params-toggle {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 14px;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+  outline: none;
+  user-select: none;
+}
+
+.params-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.params-toggle:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
+  border-radius: var(--radius);
+}
+
+.params-chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.params-section[open] .params-chevron {
+  transform: rotate(180deg);
+}
+
+.params-body {
+  border-top: 1px solid var(--border);
+  padding: 12px 14px 14px;
+}
+
+.params-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px 18px;
+}
+
+.param-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.param-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.param-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 6px 8px;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.15s;
+  /* Remove native spin buttons — they look bad on dark bg */
+  -moz-appearance: textfield;
+}
+
+.param-input::-webkit-inner-spin-button,
+.param-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}
+
+.param-input:focus {
+  border-color: var(--amber);
+}
+
+.param-hint {
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+/* ── Primary action button ────────────────────────────────────────────────── */
+
+.action-row {
+  flex-shrink: 0;
+}
+
+.btn-run {
+  display: block;
+  width: 100%;
+  background: var(--amber);
+  border: none;
+  border-radius: var(--radius);
+  color: var(--btn-text-on-amber);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 11px 20px;
+  cursor: pointer;
+  outline: none;
+  transition: opacity 0.13s, transform 0.08s;
+}
+
+.btn-run:disabled,
+.btn-run[aria-disabled="true"] {
+  opacity: 0.28;
+  cursor: not-allowed;
+}
+
+.btn-run:not(:disabled):not([aria-disabled="true"]):hover {
+  opacity: 0.88;
+}
+
+.btn-run:not(:disabled):not([aria-disabled="true"]):active {
+  transform: scale(0.993);
+}
+
+.btn-run:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
+}
+
+/* Running state → becomes "Cancelar" with red background */
+.btn-run.is-running {
+  background: var(--red);
+  color: var(--btn-text-on-red);
+}
+
+/* ── Progress ─────────────────────────────────────────────────────────────── */
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.progress-track {
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 100%;                              /* always full-width, scaled via transform */
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: var(--amber);
+  border-radius: 1px;
+  transition: transform 0.25s var(--ease-out);
+}
+
+.progress-fill.is-done  { background: var(--green); }
+.progress-fill.is-error { background: var(--red);   }
+
+.progress-pct {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  width: 32px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* ── Log panel ────────────────────────────────────────────────────────────── */
+
+.log-panel {
+  flex: 1;
+  min-height: 90px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.log-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  pointer-events: none;
+  text-align: center;
+  padding: 20px;
+}
+
+.log-lines {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.75;
+  color: var(--text-muted);
+  scroll-behavior: smooth;
+}
+
+.log-line {
+  animation: fadeSlideIn 0.15s var(--ease-out) both;
+}
+
+.log-line--error   { color: var(--red);   }
+.log-line--success { color: var(--green); }
+
+.log-ts {
+  color: var(--text-faint);
+  margin-right: 10px;
+  user-select: none;
+}
+
+/* Thin custom scrollbar */
+.log-lines::-webkit-scrollbar         { width: 4px; }
+.log-lines::-webkit-scrollbar-track   { background: transparent; }
+.log-lines::-webkit-scrollbar-thumb   { background: var(--border); border-radius: 2px; }
+.log-lines::-webkit-scrollbar-thumb:hover { background: var(--border-focus); }
+
+/* ── Animations ───────────────────────────────────────────────────────────── */
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
