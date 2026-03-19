@@ -37,10 +37,10 @@ VALID_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
 
 
 def list_images(folder):
-    files = []
+    files = set()
     for ext in VALID_EXTS:
-        files.extend(glob.glob(os.path.join(folder, ext)))
-        files.extend(glob.glob(os.path.join(folder, ext.upper())))
+        files.update(glob.glob(os.path.join(folder, ext)))
+        files.update(glob.glob(os.path.join(folder, ext.upper())))
     return sorted(files)
 
 
@@ -172,26 +172,27 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
         if frame is None:
-            continue
-        h, w = frame.shape[:2]
-        pt = smoothed[i - 1]
-        dx = target_x - pt[0]
-        dy = target_y - pt[1]
-        max_dx = max(max_dx, abs(dx))
-        max_dy = max(max_dy, abs(dy))
+            log(f"No pude abrir en segunda pasada: {os.path.basename(f)}")
+        else:
+            h, w = frame.shape[:2]
+            pt = smoothed[i - 1]
+            dx = target_x - pt[0]
+            dy = target_y - pt[1]
+            max_dx = max(max_dx, abs(dx))
+            max_dy = max(max_dy, abs(dy))
 
-        M = np.float32([[1, 0, dx], [0, 1, dy]])
-        stabilized = cv2.warpAffine(
-            frame,
-            M,
-            (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            stabilized = cv2.warpAffine(
+                frame,
+                M,
+                (w, h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0),
+            )
 
-        out_path = os.path.join(output_dir, os.path.basename(f))
-        cv2.imwrite(out_path, stabilized)
+            out_path = os.path.join(output_dir, os.path.basename(f))
+            cv2.imwrite(out_path, stabilized)
         if progress_cb:
             progress_cb((total + i) / (total * 2))
 
@@ -244,13 +245,28 @@ class AppBase:
         self.log(f"Carpeta cargada: {folder}")
 
     def log(self, msg):
-        self.log_box.insert("end", msg + "\n")
-        self.log_box.see("end")
-        self.root.update_idletasks()
+        self.root.after(0, lambda m=msg: (
+            self.log_box.insert("end", m + "\n"),
+            self.log_box.see("end"),
+        ))
 
     def set_progress(self, value):
-        self.progress_var.set(max(0.0, min(100.0, value * 100.0)))
-        self.root.update_idletasks()
+        self.root.after(0, lambda v=value: self.progress_var.set(max(0.0, min(100.0, v * 100.0))))
+
+    def _finish(self, summary, output_dir):
+        self.log("\nProceso terminado correctamente.")
+        self.run_btn.config(state="normal")
+        self.set_progress(1.0)
+        messagebox.showinfo(
+            "Listo",
+            f"Secuencia estabilizada.\n\nSalida:\n{output_dir}\n\nSin detección: {summary['failed_detections']}",
+        )
+
+    def _error(self, e):
+        self.log(f"ERROR: {e}")
+        self.run_btn.config(state="normal")
+        self.set_progress(1.0)
+        messagebox.showerror("Error", str(e))
 
     def run_process(self):
         input_dir = self.input_var.get().strip()
@@ -276,17 +292,9 @@ class AppBase:
                     threshold=int(self.threshold_var.get()),
                     smooth_radius=int(self.smooth_var.get()),
                 )
-                self.log("\nProceso terminado correctamente.")
-                messagebox.showinfo(
-                    "Listo",
-                    f"Secuencia estabilizada.\n\nSalida:\n{output_dir}\n\nSin detección: {summary['failed_detections']}",
-                )
+                self.root.after(0, lambda: self._finish(summary, output_dir))
             except Exception as e:
-                messagebox.showerror("Error", str(e))
-                self.log(f"ERROR: {e}")
-            finally:
-                self.run_btn.config(state="normal")
-                self.set_progress(1.0)
+                self.root.after(0, lambda err=e: self._error(err))
 
         threading.Thread(target=worker, daemon=True).start()
 
