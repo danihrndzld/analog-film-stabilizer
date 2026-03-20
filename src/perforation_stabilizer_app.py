@@ -1,39 +1,8 @@
 import os
-import sys
 import glob
-import threading
-from pathlib import Path
-import subprocess
-import importlib.util
-
-# --- Auto dependency check ---
-
-def ensure_package(pkg_name, import_name=None):
-    import_name = import_name or pkg_name
-    if importlib.util.find_spec(import_name) is None:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name])
-
-if not getattr(sys, "frozen", False):
-    try:
-        ensure_package("opencv-python", "cv2")
-        ensure_package("numpy")
-    except Exception as e:
-        print("No pude instalar dependencias automáticamente:", e)
 
 import cv2
 import numpy as np
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-
-# Drag & drop support (optional)
-DND_OK = False
-try:
-    if not getattr(sys, "frozen", False):
-        ensure_package("tkinterdnd2")
-    from tkinterdnd2 import DND_FILES, TkinterDnD
-    DND_OK = True
-except Exception:
-    DND_OK = False
 
 VALID_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
 
@@ -109,7 +78,7 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
     """Detect the perforation anchor point in a frame.
 
     film_format values:
-      'super8'  — 1 perf, left ROI (current default)
+      'super8'  — 1 perf, left ROI (default)
       '8mm'     — 2 perfs per frame, right ROI; midpoint used as anchor
       'super16' — 1 perf, right ROI
     """
@@ -160,7 +129,9 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
     return resolve(adaptive)
 
 
-def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_ratio=0.22, threshold=210, smooth_radius=9, jpeg_quality=0, film_format='super8'):
+def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
+                     roi_ratio=0.22, threshold=210, smooth_radius=9,
+                     jpeg_quality=0, film_format='super8'):
     files = list_images(input_dir)
     if not files:
         raise RuntimeError("No encontré imágenes dentro de la carpeta.")
@@ -185,7 +156,8 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
             failures += 1
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
-            pt = detect_perforation(frame, roi_ratio=roi_ratio, threshold=threshold, film_format=film_format)
+            pt = detect_perforation(frame, roi_ratio=roi_ratio, threshold=threshold,
+                                    film_format=film_format)
             points.append(pt)
             if pt is None:
                 failures += 1
@@ -270,267 +242,3 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
     log(f"Sin detección: {summary['failed_detections']}")
     log(f"Tamaño de salida: {out_w}×{out_h} px")
     return summary
-
-
-class AppBase:
-    def parse_drop_path(self, data):
-        data = data.strip()
-        if data.startswith("{") and data.endswith("}"):
-            data = data[1:-1]
-        return data
-
-    def choose_input(self):
-        folder = filedialog.askdirectory(title="Selecciona la carpeta de frames")
-        if folder:
-            self.set_input(folder)
-
-    def choose_output(self):
-        folder = filedialog.askdirectory(title="Selecciona la carpeta de salida")
-        if folder:
-            self.output_var.set(folder)
-
-    def set_input(self, folder):
-        self.input_var.set(folder)
-        auto_out = str(Path(folder).parent / f"{Path(folder).name}_ESTABILIZADO")
-        self.output_var.set(auto_out)
-        self.log(f"Carpeta cargada: {folder}")
-
-    def log(self, msg):
-        self.root.after(0, lambda m=msg: (
-            self.log_box.insert("end", m + "\n"),
-            self.log_box.see("end"),
-        ))
-
-    def set_progress(self, value):
-        self.root.after(0, lambda v=value: self.progress_var.set(max(0.0, min(100.0, v * 100.0))))
-
-    def _finish(self, summary, output_dir):
-        self.log("\nProceso terminado correctamente.")
-        self.run_btn.config(state="normal")
-        self.set_progress(1.0)
-        messagebox.showinfo(
-            "Listo",
-            f"Secuencia estabilizada.\n\nSalida:\n{output_dir}\n\nSin detección: {summary['failed_detections']}",
-        )
-
-    def _error(self, e):
-        self.log(f"ERROR: {e}")
-        self.run_btn.config(state="normal")
-        self.set_progress(1.0)
-        messagebox.showerror("Error", str(e))
-
-    def run_process(self):
-        input_dir = self.input_var.get().strip()
-        output_dir = self.output_var.get().strip()
-        if not input_dir or not os.path.isdir(input_dir):
-            messagebox.showerror("Error", "Selecciona o arrastra una carpeta válida.")
-            return
-        if not output_dir:
-            messagebox.showerror("Error", "Falta la carpeta de salida.")
-            return
-
-        self.run_btn.config(state="disabled")
-        self.progress_var.set(0)
-
-        def worker():
-            try:
-                summary = stabilize_folder(
-                    input_dir=input_dir,
-                    output_dir=output_dir,
-                    progress_cb=self.set_progress,
-                    log_cb=self.log,
-                    roi_ratio=float(self.roi_var.get()),
-                    threshold=int(self.threshold_var.get()),
-                    smooth_radius=int(self.smooth_var.get()),
-                    jpeg_quality=int(self.quality_var.get()),
-                    film_format=self.format_var.get(),
-                )
-                self.root.after(0, lambda: self._finish(summary, output_dir))
-            except Exception as e:
-                self.root.after(0, lambda err=e: self._error(err))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-
-class DragDropApp(AppBase):
-    def __init__(self):
-        self.root = TkinterDnD.Tk()
-        self.build_ui()
-
-    def build_ui(self):
-        self.root.title("Perforation Stabilizer")
-        self.root.geometry("760x580")
-        self.root.configure(padx=18, pady=18)
-
-        self.input_var = tk.StringVar()
-        self.output_var = tk.StringVar()
-        self.progress_var = tk.DoubleVar(value=0)
-        self.format_var = tk.StringVar(value="super8")
-        self.roi_var = tk.StringVar(value="0.22")
-        self.threshold_var = tk.StringVar(value="210")
-        self.smooth_var = tk.StringVar(value="9")
-        self.quality_var = tk.StringVar(value="0")
-
-        tk.Label(self.root, text="Arrastra aquí la carpeta de frames", font=("Arial", 16, "bold")).pack(anchor="w")
-        drop = tk.Label(self.root, text="⬇️ Suelta aquí la carpeta ⬇️", relief="groove", bd=2, height=5, bg="#f6f6f6")
-        drop.pack(fill="x", pady=(8, 14))
-        drop.drop_target_register(DND_FILES)
-        drop.dnd_bind("<<Drop>>", self.on_drop)
-
-        row1 = tk.Frame(self.root)
-        row1.pack(fill="x", pady=4)
-        tk.Label(row1, text="Input:", width=8, anchor="w").pack(side="left")
-        tk.Entry(row1, textvariable=self.input_var).pack(side="left", fill="x", expand=True)
-        tk.Button(row1, text="Elegir", command=self.choose_input).pack(side="left", padx=(8, 0))
-
-        row2 = tk.Frame(self.root)
-        row2.pack(fill="x", pady=4)
-        tk.Label(row2, text="Output:", width=8, anchor="w").pack(side="left")
-        tk.Entry(row2, textvariable=self.output_var).pack(side="left", fill="x", expand=True)
-        tk.Button(row2, text="Elegir", command=self.choose_output).pack(side="left", padx=(8, 0))
-
-        fmt_row = tk.Frame(self.root)
-        fmt_row.pack(fill="x", pady=(10, 4))
-        tk.Label(fmt_row, text="Formato de film:", anchor="w").pack(side="left")
-        ttk.Combobox(
-            fmt_row, textvariable=self.format_var,
-            values=["super8", "8mm", "super16"],
-            state="readonly", width=14,
-        ).pack(side="left", padx=(8, 0))
-
-        opts = tk.Frame(self.root)
-        opts.pack(fill="x", pady=(4, 4))
-        tk.Label(opts, text="ROI").grid(row=0, column=0, sticky="w")
-        tk.Entry(opts, textvariable=self.roi_var, width=8).grid(row=0, column=1, padx=(6, 16))
-        tk.Label(opts, text="Threshold").grid(row=0, column=2, sticky="w")
-        tk.Entry(opts, textvariable=self.threshold_var, width=8).grid(row=0, column=3, padx=(6, 16))
-        tk.Label(opts, text="Suavizado").grid(row=0, column=4, sticky="w")
-        tk.Entry(opts, textvariable=self.smooth_var, width=8).grid(row=0, column=5, padx=(6, 16))
-
-        # Advanced options (collapsible)
-        self._adv_open = tk.BooleanVar(value=False)
-        adv_toggle = tk.Checkbutton(self.root, text="▶ Opciones avanzadas", variable=self._adv_open,
-                                    indicatoron=False, relief="flat", anchor="w",
-                                    command=self._toggle_advanced_dnd)
-        adv_toggle.pack(fill="x", pady=(2, 0))
-        self._adv_frame = tk.Frame(self.root)
-        tk.Label(self._adv_frame, text="Calidad JPEG (1–100; 0 = PNG lossless)").pack(side="left")
-        tk.Entry(self._adv_frame, textvariable=self.quality_var, width=6).pack(side="left", padx=(8, 0))
-
-        self.run_btn = tk.Button(self.root, text="Estabilizar secuencia", font=("Arial", 13, "bold"), command=self.run_process)
-        self.run_btn.pack(fill="x", pady=(8, 10))
-
-        ttk.Progressbar(self.root, variable=self.progress_var, maximum=100).pack(fill="x", pady=(0, 10))
-
-        self.log_box = tk.Text(self.root, height=16, wrap="word")
-        self.log_box.pack(fill="both", expand=True)
-        self.log("Listo. Puedes arrastrar una carpeta o usar el botón Elegir.")
-        self.log("Salida: PNG lossless (sin compresión). Cambia en Opciones avanzadas si necesitas JPEG.")
-
-    def _toggle_advanced_dnd(self):
-        if self._adv_open.get():
-            self._adv_frame.pack(fill="x", pady=(0, 4))
-        else:
-            self._adv_frame.pack_forget()
-
-    def on_drop(self, event):
-        folder = self.parse_drop_path(event.data)
-        if os.path.isdir(folder):
-            self.set_input(folder)
-        else:
-            messagebox.showerror("Error", "Lo que arrastraste no es una carpeta válida.")
-
-
-class PickerApp(AppBase):
-    def __init__(self):
-        self.root = tk.Tk()
-        self.build_ui()
-
-    def build_ui(self):
-        self.root.title("Perforation Stabilizer")
-        self.root.geometry("760x560")
-        self.root.configure(padx=18, pady=18)
-
-        self.input_var = tk.StringVar()
-        self.output_var = tk.StringVar()
-        self.progress_var = tk.DoubleVar(value=0)
-        self.format_var = tk.StringVar(value="super8")
-        self.roi_var = tk.StringVar(value="0.22")
-        self.threshold_var = tk.StringVar(value="210")
-        self.smooth_var = tk.StringVar(value="9")
-        self.quality_var = tk.StringVar(value="0")
-
-        tk.Label(self.root, text="Perforation Stabilizer", font=("Arial", 16, "bold")).pack(anchor="w")
-        tk.Label(self.root, text="Elige la carpeta de frames y el programa fijará la perforación en toda la secuencia.").pack(anchor="w", pady=(4, 12))
-
-        row1 = tk.Frame(self.root)
-        row1.pack(fill="x", pady=4)
-        tk.Label(row1, text="Input:", width=8, anchor="w").pack(side="left")
-        tk.Entry(row1, textvariable=self.input_var).pack(side="left", fill="x", expand=True)
-        tk.Button(row1, text="Elegir", command=self.choose_input).pack(side="left", padx=(8, 0))
-
-        row2 = tk.Frame(self.root)
-        row2.pack(fill="x", pady=4)
-        tk.Label(row2, text="Output:", width=8, anchor="w").pack(side="left")
-        tk.Entry(row2, textvariable=self.output_var).pack(side="left", fill="x", expand=True)
-        tk.Button(row2, text="Elegir", command=self.choose_output).pack(side="left", padx=(8, 0))
-
-        fmt_row = tk.Frame(self.root)
-        fmt_row.pack(fill="x", pady=(10, 4))
-        tk.Label(fmt_row, text="Formato de film:", anchor="w").pack(side="left")
-        ttk.Combobox(
-            fmt_row, textvariable=self.format_var,
-            values=["super8", "8mm", "super16"],
-            state="readonly", width=14,
-        ).pack(side="left", padx=(8, 0))
-
-        opts = tk.Frame(self.root)
-        opts.pack(fill="x", pady=(4, 4))
-        tk.Label(opts, text="ROI").grid(row=0, column=0, sticky="w")
-        tk.Entry(opts, textvariable=self.roi_var, width=8).grid(row=0, column=1, padx=(6, 16))
-        tk.Label(opts, text="Threshold").grid(row=0, column=2, sticky="w")
-        tk.Entry(opts, textvariable=self.threshold_var, width=8).grid(row=0, column=3, padx=(6, 16))
-        tk.Label(opts, text="Suavizado").grid(row=0, column=4, sticky="w")
-        tk.Entry(opts, textvariable=self.smooth_var, width=8).grid(row=0, column=5, padx=(6, 16))
-
-        # Advanced options (collapsible)
-        self._adv_open = tk.BooleanVar(value=False)
-        adv_toggle = tk.Checkbutton(self.root, text="▶ Opciones avanzadas", variable=self._adv_open,
-                                    indicatoron=False, relief="flat", anchor="w",
-                                    command=self._toggle_advanced_picker)
-        adv_toggle.pack(fill="x", pady=(2, 0))
-        self._adv_frame = tk.Frame(self.root)
-        tk.Label(self._adv_frame, text="Calidad JPEG (1–100; 0 = PNG lossless)").pack(side="left")
-        tk.Entry(self._adv_frame, textvariable=self.quality_var, width=6).pack(side="left", padx=(8, 0))
-
-        self.run_btn = tk.Button(self.root, text="Estabilizar secuencia", font=("Arial", 13, "bold"), command=self.run_process)
-        self.run_btn.pack(fill="x", pady=(8, 10))
-
-        ttk.Progressbar(self.root, variable=self.progress_var, maximum=100).pack(fill="x", pady=(0, 10))
-
-        self.log_box = tk.Text(self.root, height=16, wrap="word")
-        self.log_box.pack(fill="both", expand=True)
-        self.log("Listo. Usa el botón Elegir para seleccionar tu carpeta.")
-        self.log("Salida: PNG lossless (sin compresión). Cambia en Opciones avanzadas si necesitas JPEG.")
-
-
-    def _toggle_advanced_picker(self):
-        if self._adv_open.get():
-            self._adv_frame.pack(fill="x", pady=(0, 4))
-        else:
-            self._adv_frame.pack_forget()
-
-
-def main():
-    if DND_OK:
-        try:
-            app = DragDropApp()
-        except Exception:
-            app = PickerApp()
-    else:
-        app = PickerApp()
-    app.root.mainloop()
-
-
-if __name__ == "__main__":
-    main()

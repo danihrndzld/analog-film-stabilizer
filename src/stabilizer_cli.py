@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-CLI wrapper for stabilize_folder.
+CLI backend for the Electron UI.
 Streams JSON-lines to stdout so Electron can consume progress and logs.
 
 Usage:
-  python3 stabilizer_cli.py --input DIR --output DIR [--roi F] [--threshold N] [--smooth N] [--quality N] [--film-format super8|8mm|super16]
+  python3 stabilizer_cli.py --input DIR --output DIR [--roi F] [--threshold N]
+                             [--smooth N] [--quality N] [--film-format super8|8mm|super16]
 
 Output lines (one per line, each valid JSON):
   {"type": "progress", "value": 0.0..1.0}
@@ -17,32 +18,7 @@ import sys
 import json
 import argparse
 import os
-import types
 
-# ── Tkinter mock ──────────────────────────────────────────────────────────────
-# perforation_stabilizer_app.py imports tkinter at module level for its GUI.
-# We only need the pure processing functions (stabilize_folder and helpers),
-# so we inject stub modules before importing to avoid requiring a Tk build.
-class _Stub:
-    """A stub that silently absorbs any attribute access or call."""
-    def __getattr__(self, _):    return _Stub()
-    def __call__(self, *a, **kw): return _Stub()
-    def __iter__(self):           return iter([])
-    def __bool__(self):           return False
-
-class _StubModule(types.ModuleType):
-    """Module subclass that returns _Stub() for any missing attribute."""
-    def __getattr__(self, attr):
-        return _Stub()
-
-def _make_stub(name):
-    return _StubModule(name)
-
-for _mod_name in ['tkinter', 'tkinter.filedialog', 'tkinter.messagebox', 'tkinter.ttk', 'tkinterdnd2']:
-    if _mod_name not in sys.modules:
-        sys.modules[_mod_name] = _make_stub(_mod_name)
-
-# Locate perforation_stabilizer_app.py next to this file
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from perforation_stabilizer_app import stabilize_folder
@@ -54,12 +30,12 @@ def emit(obj):
 
 def main():
     parser = argparse.ArgumentParser(description="Perforation stabilizer CLI")
-    parser.add_argument("--input",     required=True,              help="Input folder with frames")
-    parser.add_argument("--output",    required=True,              help="Output folder")
-    parser.add_argument("--roi",       type=float, default=0.22,   help="Left ROI fraction (default 0.22)")
-    parser.add_argument("--threshold", type=int,   default=210,    help="Brightness threshold (default 210)")
-    parser.add_argument("--smooth",    type=int,   default=9,      help="Moving-average radius (default 9)")
-    parser.add_argument("--quality",     type=int,   default=95,      help="JPEG quality 1-100, 0=PNG (default 95)")
+    parser.add_argument("--input",       required=True,                                   help="Input folder with frames")
+    parser.add_argument("--output",      required=True,                                   help="Output folder")
+    parser.add_argument("--roi",         type=float, default=0.22,                        help="ROI fraction (default 0.22)")
+    parser.add_argument("--threshold",   type=int,   default=210,                         help="Brightness threshold (default 210)")
+    parser.add_argument("--smooth",      type=int,   default=9,                           help="Moving-average radius (default 9)")
+    parser.add_argument("--quality",     type=int,   default=95,                          help="JPEG quality 1-100, 0=PNG (default 95)")
     parser.add_argument("--film-format", choices=["super8", "8mm", "super16"], default="super8",
                         help="Film format: super8 (default), 8mm, super16")
     args = parser.parse_args()
