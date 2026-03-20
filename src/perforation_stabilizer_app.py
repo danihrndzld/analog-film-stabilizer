@@ -68,12 +68,14 @@ def moving_average(points, radius=9):
     return list(zip(xs_s.tolist(), ys_s.tolist()))
 
 
-def _best_contour(thresh, roi_w):
-    """Return (cx, cy) of the best perforation candidate in a binary image, or None."""
+def _best_contour(thresh, roi_w, top_n=1):
+    """Return top_n perforation candidates from a binary image as (cx, cy) tuples.
+
+    When top_n=1 returns a single (cx, cy) tuple or None (backward-compatible).
+    When top_n>1 returns a list of (cx, cy) tuples (may be shorter than top_n).
+    """
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    best_score = -1
-    best_cnt = None
-    best_box = None
+    candidates = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < 5000:
@@ -88,36 +90,64 @@ def _best_contour(thresh, roi_w):
         if x > roi_w * 0.70:
             continue
         score = area + (fill_ratio * 1000.0)
-        if score > best_score:
-            best_score = score
-            best_cnt = cnt
-            best_box = (x, y, bw, bh)
-    if best_cnt is None:
-        return None
-    x, y, bw, bh = best_box
-    M = cv2.moments(best_cnt)
-    cx = M["m10"] / M["m00"] if M["m00"] != 0 else x + bw / 2.0
-    cy = M["m01"] / M["m00"] if M["m00"] != 0 else y + bh / 2.0
-    return (float(cx), float(cy))
+        candidates.append((score, cnt, (x, y, bw, bh)))
+
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    results = []
+    for score, cnt, (x, y, bw, bh) in candidates[:top_n]:
+        M = cv2.moments(cnt)
+        cx = M["m10"] / M["m00"] if M["m00"] != 0 else x + bw / 2.0
+        cy = M["m01"] / M["m00"] if M["m00"] != 0 else y + bh / 2.0
+        results.append((float(cx), float(cy)))
+
+    if top_n == 1:
+        return results[0] if results else None
+    return results
 
 
-def detect_perforation(frame, roi_ratio=0.22, threshold=210):
+def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8'):
+    """Detect the perforation anchor point in a frame.
+
+    film_format values:
+      'super8'  — 1 perf, left ROI (current default)
+      '8mm'     — 2 perfs per frame, right ROI; midpoint used as anchor
+      'super16' — 1 perf, right ROI
+    """
     h, w = frame.shape[:2]
     roi_w = max(50, int(w * roi_ratio))
-    roi = frame[:, :roi_w]
+
+    roi_side = 'right' if film_format in ('8mm', 'super16') else 'left'
+    roi_x_offset = (w - roi_w) if roi_side == 'right' else 0
+    roi = frame[:, w - roi_w:] if roi_side == 'right' else frame[:, :roi_w]
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
     kernel = np.ones((3, 3), np.uint8)
+
+    def resolve(thresh_img):
+        top_n = 2 if film_format == '8mm' else 1
+        result = _best_contour(thresh_img, roi_w, top_n=top_n)
+        if top_n == 1:
+            if result is None:
+                return None
+            cx, cy = result
+        else:
+            if not result:
+                return None
+            if len(result) == 2:
+                cx = (result[0][0] + result[1][0]) / 2.0
+                cy = (result[0][1] + result[1][1]) / 2.0
+            else:
+                cx, cy = result[0]
+        return (float(cx + roi_x_offset), float(cy))
 
     # Primary: global threshold
     _, thresh = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    result = _best_contour(thresh, roi_w)
-    if result is not None:
-        return result
+    pt = resolve(thresh)
+    if pt is not None:
+        return pt
 
     # Fallback: adaptive threshold — handles overexposed frames where the
     # global threshold saturates the entire ROI.
@@ -127,10 +157,10 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210):
     )
     adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_OPEN, kernel)
     adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel)
-    return _best_contour(adaptive, roi_w)
+    return resolve(adaptive)
 
 
-def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_ratio=0.22, threshold=210, smooth_radius=9, jpeg_quality=0):
+def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_ratio=0.22, threshold=210, smooth_radius=9, jpeg_quality=0, film_format='super8'):
     files = list_images(input_dir)
     if not files:
         raise RuntimeError("No encontré imágenes dentro de la carpeta.")
@@ -155,7 +185,7 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
             failures += 1
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
-            pt = detect_perforation(frame, roi_ratio=roi_ratio, threshold=threshold)
+            pt = detect_perforation(frame, roi_ratio=roi_ratio, threshold=threshold, film_format=film_format)
             points.append(pt)
             if pt is None:
                 failures += 1
@@ -226,6 +256,7 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
         "output_width": out_w,
         "output_height": out_h,
         "output_format": "png (lossless)" if jpeg_quality == 0 else f"jpeg q{jpeg_quality}",
+        "film_format": film_format,
     }
 
     with open(os.path.join(output_dir, "stabilization_report.txt"), "w", encoding="utf-8") as f:
@@ -312,6 +343,7 @@ class AppBase:
                     threshold=int(self.threshold_var.get()),
                     smooth_radius=int(self.smooth_var.get()),
                     jpeg_quality=int(self.quality_var.get()),
+                    film_format=self.format_var.get(),
                 )
                 self.root.after(0, lambda: self._finish(summary, output_dir))
             except Exception as e:
@@ -333,6 +365,7 @@ class DragDropApp(AppBase):
         self.input_var = tk.StringVar()
         self.output_var = tk.StringVar()
         self.progress_var = tk.DoubleVar(value=0)
+        self.format_var = tk.StringVar(value="super8")
         self.roi_var = tk.StringVar(value="0.22")
         self.threshold_var = tk.StringVar(value="210")
         self.smooth_var = tk.StringVar(value="9")
@@ -356,9 +389,18 @@ class DragDropApp(AppBase):
         tk.Entry(row2, textvariable=self.output_var).pack(side="left", fill="x", expand=True)
         tk.Button(row2, text="Elegir", command=self.choose_output).pack(side="left", padx=(8, 0))
 
+        fmt_row = tk.Frame(self.root)
+        fmt_row.pack(fill="x", pady=(10, 4))
+        tk.Label(fmt_row, text="Formato de film:", anchor="w").pack(side="left")
+        ttk.Combobox(
+            fmt_row, textvariable=self.format_var,
+            values=["super8", "8mm", "super16"],
+            state="readonly", width=14,
+        ).pack(side="left", padx=(8, 0))
+
         opts = tk.Frame(self.root)
-        opts.pack(fill="x", pady=(10, 4))
-        tk.Label(opts, text="ROI izq.").grid(row=0, column=0, sticky="w")
+        opts.pack(fill="x", pady=(4, 4))
+        tk.Label(opts, text="ROI").grid(row=0, column=0, sticky="w")
         tk.Entry(opts, textvariable=self.roi_var, width=8).grid(row=0, column=1, padx=(6, 16))
         tk.Label(opts, text="Threshold").grid(row=0, column=2, sticky="w")
         tk.Entry(opts, textvariable=self.threshold_var, width=8).grid(row=0, column=3, padx=(6, 16))
@@ -412,6 +454,7 @@ class PickerApp(AppBase):
         self.input_var = tk.StringVar()
         self.output_var = tk.StringVar()
         self.progress_var = tk.DoubleVar(value=0)
+        self.format_var = tk.StringVar(value="super8")
         self.roi_var = tk.StringVar(value="0.22")
         self.threshold_var = tk.StringVar(value="210")
         self.smooth_var = tk.StringVar(value="9")
@@ -432,9 +475,18 @@ class PickerApp(AppBase):
         tk.Entry(row2, textvariable=self.output_var).pack(side="left", fill="x", expand=True)
         tk.Button(row2, text="Elegir", command=self.choose_output).pack(side="left", padx=(8, 0))
 
+        fmt_row = tk.Frame(self.root)
+        fmt_row.pack(fill="x", pady=(10, 4))
+        tk.Label(fmt_row, text="Formato de film:", anchor="w").pack(side="left")
+        ttk.Combobox(
+            fmt_row, textvariable=self.format_var,
+            values=["super8", "8mm", "super16"],
+            state="readonly", width=14,
+        ).pack(side="left", padx=(8, 0))
+
         opts = tk.Frame(self.root)
-        opts.pack(fill="x", pady=(10, 4))
-        tk.Label(opts, text="ROI izq.").grid(row=0, column=0, sticky="w")
+        opts.pack(fill="x", pady=(4, 4))
+        tk.Label(opts, text="ROI").grid(row=0, column=0, sticky="w")
         tk.Entry(opts, textvariable=self.roi_var, width=8).grid(row=0, column=1, padx=(6, 16))
         tk.Label(opts, text="Threshold").grid(row=0, column=2, sticky="w")
         tk.Entry(opts, textvariable=self.threshold_var, width=8).grid(row=0, column=3, padx=(6, 16))

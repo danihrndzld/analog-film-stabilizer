@@ -15,6 +15,7 @@ const progressPct   = document.getElementById('progressPct');
 const logLines      = document.getElementById('logLines');
 const logEmpty      = document.getElementById('logEmpty');
 const paramsSection = document.getElementById('paramsSection');
+const filmFormatEl  = document.getElementById('filmFormat');
 
 // ── Version badge ─────────────────────────────────────────────────────────────
 const versionBadge = document.getElementById('appVersion');
@@ -146,7 +147,8 @@ function startProcess() {
     roi:       parseFloat(document.getElementById('paramRoi').value)       || 0.22,
     threshold: parseInt(document.getElementById('paramThreshold').value, 10) || 210,
     smooth:    parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
-    quality:   parseInt(document.getElementById('paramQuality').value, 10),  // 0 is valid (PNG)
+    quality:    parseInt(document.getElementById('paramQuality').value, 10),  // 0 is valid (PNG)
+    filmFormat: filmFormatEl.value || 'super8',
   });
 }
 

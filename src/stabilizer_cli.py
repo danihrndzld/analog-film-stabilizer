@@ -4,7 +4,7 @@ CLI wrapper for stabilize_folder.
 Streams JSON-lines to stdout so Electron can consume progress and logs.
 
 Usage:
-  python3 stabilizer_cli.py --input DIR --output DIR [--roi F] [--threshold N] [--smooth N] [--quality N]
+  python3 stabilizer_cli.py --input DIR --output DIR [--roi F] [--threshold N] [--smooth N] [--quality N] [--film-format super8|8mm|super16]
 
 Output lines (one per line, each valid JSON):
   {"type": "progress", "value": 0.0..1.0}
@@ -59,7 +59,9 @@ def main():
     parser.add_argument("--roi",       type=float, default=0.22,   help="Left ROI fraction (default 0.22)")
     parser.add_argument("--threshold", type=int,   default=210,    help="Brightness threshold (default 210)")
     parser.add_argument("--smooth",    type=int,   default=9,      help="Moving-average radius (default 9)")
-    parser.add_argument("--quality",   type=int,   default=95,     help="JPEG quality 1-100, 0=PNG (default 95)")
+    parser.add_argument("--quality",     type=int,   default=95,      help="JPEG quality 1-100, 0=PNG (default 95)")
+    parser.add_argument("--film-format", choices=["super8", "8mm", "super16"], default="super8",
+                        help="Film format: super8 (default), 8mm, super16")
     args = parser.parse_args()
 
     try:
@@ -72,6 +74,7 @@ def main():
             threshold=args.threshold,
             smooth_radius=args.smooth,
             jpeg_quality=args.quality,
+            film_format=args.film_format,
         )
         emit({"type": "done", "summary": summary})
     except Exception as exc:

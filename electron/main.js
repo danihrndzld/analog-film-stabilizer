@@ -59,12 +59,13 @@ ipcMain.handle('start-process', (event, opts) => {
 
   const args = [
     scriptPath,
-    '--input',     opts.input,
-    '--output',    opts.output,
-    '--roi',       String(opts.roi),
-    '--threshold', String(opts.threshold),
-    '--smooth',    String(opts.smooth),
-    '--quality',   String(opts.quality),
+    '--input',       opts.input,
+    '--output',      opts.output,
+    '--roi',         String(opts.roi),
+    '--threshold',   String(opts.threshold),
+    '--smooth',      String(opts.smooth),
+    '--quality',     String(opts.quality),
+    '--film-format', String(opts.filmFormat || 'super8'),
   ];
 
   pyProcess = spawn('python3', args);
