@@ -16,6 +16,13 @@ const logLines      = document.getElementById('logLines');
 const logEmpty      = document.getElementById('logEmpty');
 const paramsSection = document.getElementById('paramsSection');
 
+// ── Version badge ─────────────────────────────────────────────────────────────
+const versionBadge = document.getElementById('appVersion');
+if (versionBadge && window.api.version) {
+  versionBadge.textContent = `v${window.api.version}`;
+  versionBadge.setAttribute('aria-label', `Versión ${window.api.version}`);
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let isRunning = false;
 
