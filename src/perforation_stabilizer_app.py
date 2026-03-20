@@ -130,7 +130,7 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210):
     return _best_contour(adaptive, roi_w)
 
 
-def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_ratio=0.22, threshold=210, smooth_radius=9, jpeg_quality=95):
+def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_ratio=0.22, threshold=210, smooth_radius=9, jpeg_quality=0):
     files = list_images(input_dir)
     if not files:
         raise RuntimeError("No encontré imágenes dentro de la carpeta.")
@@ -173,8 +173,6 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
 
     # Fill None positions (failed detections) by linear interpolation.
-    # No global outlier filter: the shape filters in detect_perforation are
-    # already strict enough to ensure any returned point is the real perforation.
     xs = np.array([p[0] if p is not None else np.nan for p in points], dtype=np.float32)
     ys = np.array([p[1] if p is not None else np.nan for p in points], dtype=np.float32)
     idx = np.arange(len(xs))
@@ -183,12 +181,6 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
     if np.any(good_y): ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
     per_frame = list(zip(xs.tolist(), ys.tolist()))
 
-    shifts = [(target_x - pt[0], target_y - pt[1]) for pt in per_frame]
-    crop_left   = int(np.ceil(max(max(dx, 0) for dx, dy in shifts)))
-    crop_right  = int(np.ceil(max(max(-dx, 0) for dx, dy in shifts)))
-    crop_top    = int(np.ceil(max(max(dy, 0) for dx, dy in shifts)))
-    crop_bottom = int(np.ceil(max(max(-dy, 0) for dx, dy in shifts)))
-    log(f"Crop aplicado — L:{crop_left} R:{crop_right} T:{crop_top} B:{crop_bottom}")
     log("Segunda pasada: estabilizando y guardando...")
 
     out_w = out_h = None
@@ -199,6 +191,8 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
             log(f"No pude abrir en segunda pasada: {os.path.basename(f)}")
         else:
             h, w = frame.shape[:2]
+            if out_h is None:
+                out_h, out_w = h, w
             pt = per_frame[i - 1]
             dx = target_x - pt[0]
             dy = target_y - pt[1]
@@ -212,9 +206,6 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=(0, 0, 0),
             )
-            stabilized = stabilized[crop_top:h - crop_bottom, crop_left:w - crop_right]
-            if out_h is None:
-                out_h, out_w = stabilized.shape[:2]
 
             basename = os.path.basename(f)
             if jpeg_quality == 0:
@@ -234,10 +225,6 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None, roi_r
         "target_y": round(target_y, 3),
         "output_width": out_w,
         "output_height": out_h,
-        "applied_crop_left": crop_left,
-        "applied_crop_right": crop_right,
-        "applied_crop_top": crop_top,
-        "applied_crop_bottom": crop_bottom,
         "output_format": "png (lossless)" if jpeg_quality == 0 else f"jpeg q{jpeg_quality}",
     }
 
@@ -349,7 +336,7 @@ class DragDropApp(AppBase):
         self.roi_var = tk.StringVar(value="0.22")
         self.threshold_var = tk.StringVar(value="210")
         self.smooth_var = tk.StringVar(value="9")
-        self.quality_var = tk.StringVar(value="95")
+        self.quality_var = tk.StringVar(value="0")
 
         tk.Label(self.root, text="Arrastra aquí la carpeta de frames", font=("Arial", 16, "bold")).pack(anchor="w")
         drop = tk.Label(self.root, text="⬇️ Suelta aquí la carpeta ⬇️", relief="groove", bd=2, height=5, bg="#f6f6f6")
@@ -370,24 +357,39 @@ class DragDropApp(AppBase):
         tk.Button(row2, text="Elegir", command=self.choose_output).pack(side="left", padx=(8, 0))
 
         opts = tk.Frame(self.root)
-        opts.pack(fill="x", pady=(10, 10))
+        opts.pack(fill="x", pady=(10, 4))
         tk.Label(opts, text="ROI izq.").grid(row=0, column=0, sticky="w")
         tk.Entry(opts, textvariable=self.roi_var, width=8).grid(row=0, column=1, padx=(6, 16))
         tk.Label(opts, text="Threshold").grid(row=0, column=2, sticky="w")
         tk.Entry(opts, textvariable=self.threshold_var, width=8).grid(row=0, column=3, padx=(6, 16))
         tk.Label(opts, text="Suavizado").grid(row=0, column=4, sticky="w")
         tk.Entry(opts, textvariable=self.smooth_var, width=8).grid(row=0, column=5, padx=(6, 16))
-        tk.Label(opts, text="Calidad JPEG (0=PNG)").grid(row=0, column=6, sticky="w", padx=(16, 0))
-        tk.Entry(opts, textvariable=self.quality_var, width=6).grid(row=0, column=7, padx=(6, 0))
+
+        # Advanced options (collapsible)
+        self._adv_open = tk.BooleanVar(value=False)
+        adv_toggle = tk.Checkbutton(self.root, text="▶ Opciones avanzadas", variable=self._adv_open,
+                                    indicatoron=False, relief="flat", anchor="w",
+                                    command=self._toggle_advanced_dnd)
+        adv_toggle.pack(fill="x", pady=(2, 0))
+        self._adv_frame = tk.Frame(self.root)
+        tk.Label(self._adv_frame, text="Calidad JPEG (1–100; 0 = PNG lossless)").pack(side="left")
+        tk.Entry(self._adv_frame, textvariable=self.quality_var, width=6).pack(side="left", padx=(8, 0))
 
         self.run_btn = tk.Button(self.root, text="Estabilizar secuencia", font=("Arial", 13, "bold"), command=self.run_process)
-        self.run_btn.pack(fill="x", pady=(4, 10))
+        self.run_btn.pack(fill="x", pady=(8, 10))
 
         ttk.Progressbar(self.root, variable=self.progress_var, maximum=100).pack(fill="x", pady=(0, 10))
 
-        self.log_box = tk.Text(self.root, height=18, wrap="word")
+        self.log_box = tk.Text(self.root, height=16, wrap="word")
         self.log_box.pack(fill="both", expand=True)
         self.log("Listo. Puedes arrastrar una carpeta o usar el botón Elegir.")
+        self.log("Salida: PNG lossless (sin compresión). Cambia en Opciones avanzadas si necesitas JPEG.")
+
+    def _toggle_advanced_dnd(self):
+        if self._adv_open.get():
+            self._adv_frame.pack(fill="x", pady=(0, 4))
+        else:
+            self._adv_frame.pack_forget()
 
     def on_drop(self, event):
         folder = self.parse_drop_path(event.data)
@@ -413,7 +415,7 @@ class PickerApp(AppBase):
         self.roi_var = tk.StringVar(value="0.22")
         self.threshold_var = tk.StringVar(value="210")
         self.smooth_var = tk.StringVar(value="9")
-        self.quality_var = tk.StringVar(value="95")
+        self.quality_var = tk.StringVar(value="0")
 
         tk.Label(self.root, text="Perforation Stabilizer", font=("Arial", 16, "bold")).pack(anchor="w")
         tk.Label(self.root, text="Elige la carpeta de frames y el programa fijará la perforación en toda la secuencia.").pack(anchor="w", pady=(4, 12))
@@ -431,24 +433,40 @@ class PickerApp(AppBase):
         tk.Button(row2, text="Elegir", command=self.choose_output).pack(side="left", padx=(8, 0))
 
         opts = tk.Frame(self.root)
-        opts.pack(fill="x", pady=(10, 10))
+        opts.pack(fill="x", pady=(10, 4))
         tk.Label(opts, text="ROI izq.").grid(row=0, column=0, sticky="w")
         tk.Entry(opts, textvariable=self.roi_var, width=8).grid(row=0, column=1, padx=(6, 16))
         tk.Label(opts, text="Threshold").grid(row=0, column=2, sticky="w")
         tk.Entry(opts, textvariable=self.threshold_var, width=8).grid(row=0, column=3, padx=(6, 16))
         tk.Label(opts, text="Suavizado").grid(row=0, column=4, sticky="w")
         tk.Entry(opts, textvariable=self.smooth_var, width=8).grid(row=0, column=5, padx=(6, 16))
-        tk.Label(opts, text="Calidad JPEG (0=PNG)").grid(row=0, column=6, sticky="w", padx=(16, 0))
-        tk.Entry(opts, textvariable=self.quality_var, width=6).grid(row=0, column=7, padx=(6, 0))
+
+        # Advanced options (collapsible)
+        self._adv_open = tk.BooleanVar(value=False)
+        adv_toggle = tk.Checkbutton(self.root, text="▶ Opciones avanzadas", variable=self._adv_open,
+                                    indicatoron=False, relief="flat", anchor="w",
+                                    command=self._toggle_advanced_picker)
+        adv_toggle.pack(fill="x", pady=(2, 0))
+        self._adv_frame = tk.Frame(self.root)
+        tk.Label(self._adv_frame, text="Calidad JPEG (1–100; 0 = PNG lossless)").pack(side="left")
+        tk.Entry(self._adv_frame, textvariable=self.quality_var, width=6).pack(side="left", padx=(8, 0))
 
         self.run_btn = tk.Button(self.root, text="Estabilizar secuencia", font=("Arial", 13, "bold"), command=self.run_process)
-        self.run_btn.pack(fill="x", pady=(4, 10))
+        self.run_btn.pack(fill="x", pady=(8, 10))
 
         ttk.Progressbar(self.root, variable=self.progress_var, maximum=100).pack(fill="x", pady=(0, 10))
 
-        self.log_box = tk.Text(self.root, height=18, wrap="word")
+        self.log_box = tk.Text(self.root, height=16, wrap="word")
         self.log_box.pack(fill="both", expand=True)
         self.log("Listo. Usa el botón Elegir para seleccionar tu carpeta.")
+        self.log("Salida: PNG lossless (sin compresión). Cambia en Opciones avanzadas si necesitas JPEG.")
+
+
+    def _toggle_advanced_picker(self):
+        if self._adv_open.get():
+            self._adv_frame.pack(fill="x", pady=(0, 4))
+        else:
+            self._adv_frame.pack_forget()
 
 
 def main():
