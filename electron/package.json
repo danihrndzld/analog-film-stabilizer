@@ -1,6 +1,6 @@
 {
   "name": "perforation-stabilizer",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Film perforation stabilizer for analog scan sequences",
   "main": "main.js",
   "scripts": {
