@@ -27,4 +27,10 @@ contextBridge.exposeInMainWorld('api', {
 
   /** Remove all listeners for a given channel (call on page unload) */
   off: (channel) => ipcRenderer.removeAllListeners(channel),
+
+  // ── Auto-update ─────────────────────────────────────────────────────────
+  onUpdateAvailable:        (cb) => ipcRenderer.on('update-available',          (_e, info) => cb(info)),
+  onUpdateDownloadProgress: (cb) => ipcRenderer.on('update-download-progress',  (_e, p)    => cb(p)),
+  downloadUpdate:           (opts) => ipcRenderer.invoke('download-update', opts),
+  openExternal:             (url)  => ipcRenderer.invoke('open-external',   url),
 });

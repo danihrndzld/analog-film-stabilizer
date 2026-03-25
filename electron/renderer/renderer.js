@@ -232,7 +232,49 @@ paramsSection.addEventListener('toggle', () => {
 
 // ── Cleanup on unload ─────────────────────────────────────────────────────────
 window.addEventListener('beforeunload', () => {
-  ['process-progress', 'process-log', 'process-done', 'process-error'].forEach(
+  ['process-progress', 'process-log', 'process-done', 'process-error',
+   'update-available', 'update-download-progress'].forEach(
     (ch) => window.api.off(ch)
   );
+});
+
+// ── Auto-update banner ────────────────────────────────────────────────────────
+window.api.onUpdateAvailable((info) => {
+  const existing = document.getElementById('updateBanner');
+  if (existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.id        = 'updateBanner';
+  banner.className = 'update-banner';
+  banner.innerHTML =
+    `<span class="update-banner__text">
+       Nueva versión <strong>v${escapeHtml(info.version)}</strong> disponible
+     </span>
+     <button class="update-banner__btn" id="updateBtn">Actualizar</button>
+     <button class="update-banner__dismiss" id="updateDismissBtn" aria-label="Cerrar">✕</button>`;
+
+  document.querySelector('.app').prepend(banner);
+
+  document.getElementById('updateDismissBtn').addEventListener('click', () => banner.remove());
+
+  document.getElementById('updateBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('updateBtn');
+    btn.disabled    = true;
+    btn.textContent = 'Descargando…';
+
+    window.api.onUpdateDownloadProgress((p) => {
+      btn.textContent = `${Math.round(p * 100)}%`;
+    });
+
+    try {
+      await window.api.downloadUpdate({ downloadUrl: info.downloadUrl, assetName: info.assetName });
+      btn.textContent = '¡Listo!';
+      banner.querySelector('.update-banner__text').textContent =
+        'Abre el DMG y arrastra la app para reemplazar la versión actual.';
+    } catch {
+      btn.disabled    = false;
+      btn.textContent = 'Actualizar';
+      window.api.openExternal(info.releaseUrl);
+    }
+  });
 });
