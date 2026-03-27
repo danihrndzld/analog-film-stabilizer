@@ -16,12 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install Python deps + PyInstaller
-        run: pip3 install --break-system-packages pyinstaller opencv-python-headless numpy
+        run: pip install pyinstaller opencv-python-headless numpy
 
       - name: Build universal2 standalone binary
         run: |
-          python3 -m PyInstaller --onefile --name stabilizer \
+          python -m PyInstaller --onefile --name stabilizer \
             --target-arch universal2 \
             --distpath dist-py \
             --workpath /tmp/pyinstaller-build \
