@@ -31,8 +31,12 @@
     },
     "extraResources": [
       {
-        "from": "../dist-py/stabilizer",
-        "to": "stabilizer"
+        "from": "../dist-py/stabilizer_arm64",
+        "to": "stabilizer_arm64"
+      },
+      {
+        "from": "../dist-py/stabilizer_x64",
+        "to": "stabilizer_x64"
       }
     ]
   }

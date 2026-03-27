@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  # ── Build universal2 binary (arm64 + x64 in one fat binary) ───────────────
+  # ── Build bundled Python binaries (arm64 + x64) on one runner ─────────────
   python-binary:
     runs-on: macos-latest
     steps:
@@ -20,24 +20,35 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Python deps + PyInstaller
-        run: pip install pyinstaller opencv-python-headless numpy
-
-      - name: Build universal2 standalone binary
+      - name: Build arm64 binary
         run: |
-          python -m PyInstaller --onefile --name stabilizer \
-            --target-arch universal2 \
+          python3 -m venv /tmp/venv-arm64
+          /tmp/venv-arm64/bin/pip install pyinstaller opencv-python-headless numpy
+          /tmp/venv-arm64/bin/python -m PyInstaller --onefile --name stabilizer_arm64 \
             --distpath dist-py \
-            --workpath /tmp/pyinstaller-build \
+            --workpath /tmp/pyinstaller-arm64 \
+            --specpath /tmp \
+            src/stabilizer_cli.py
+
+      - name: Build x64 binary (Rosetta 2)
+        run: |
+          arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+            -m venv /tmp/venv-x64
+          arch -x86_64 /tmp/venv-x64/bin/pip install pyinstaller opencv-python-headless numpy
+          arch -x86_64 /tmp/venv-x64/bin/python -m PyInstaller --onefile --name stabilizer_x64 \
+            --distpath dist-py \
+            --workpath /tmp/pyinstaller-x64 \
             --specpath /tmp \
             src/stabilizer_cli.py
 
       - uses: actions/upload-artifact@v4
         with:
-          name: stabilizer-universal
-          path: dist-py/stabilizer
+          name: stabilizer-binaries
+          path: |
+            dist-py/stabilizer_arm64
+            dist-py/stabilizer_x64
 
-  # ── Build DMGs with binary bundled ────────────────────────────────────────
+  # ── Build DMGs with both binaries bundled ─────────────────────────────────
   build:
     needs: [python-binary]
     runs-on: macos-latest
@@ -45,14 +56,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Python binary
+      - name: Download Python binaries
         uses: actions/download-artifact@v4
         with:
-          name: stabilizer-universal
+          name: stabilizer-binaries
           path: dist-py
 
-      - name: Make binary executable
-        run: chmod +x dist-py/stabilizer
+      - name: Make binaries executable
+        run: chmod +x dist-py/stabilizer_arm64 dist-py/stabilizer_x64
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
