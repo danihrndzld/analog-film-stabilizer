@@ -10,67 +10,45 @@ permissions:
   contents: write
 
 jobs:
-  # ── Build bundled Python binary for Apple Silicon ──────────────────────────
-  python-arm64:
-    runs-on: macos-latest   # GitHub's arm64 runner
+  # ── Build universal2 binary (arm64 + x64 in one fat binary) ───────────────
+  python-binary:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Python deps + PyInstaller
         run: pip3 install --break-system-packages pyinstaller opencv-python-headless numpy
 
-      - name: Build standalone binary (arm64)
+      - name: Build universal2 standalone binary
         run: |
-          python3 -m PyInstaller --onefile --name stabilizer_arm64 \
+          python3 -m PyInstaller --onefile --name stabilizer \
+            --target-arch universal2 \
             --distpath dist-py \
-            --workpath /tmp/pyinstaller-arm64 \
+            --workpath /tmp/pyinstaller-build \
             --specpath /tmp \
             src/stabilizer_cli.py
 
       - uses: actions/upload-artifact@v4
         with:
-          name: stabilizer-arm64
-          path: dist-py/stabilizer_arm64
+          name: stabilizer-universal
+          path: dist-py/stabilizer
 
-  # ── Build bundled Python binary for Intel ─────────────────────────────────
-  python-x64:
-    runs-on: macos-13       # last GitHub Intel runner
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Python deps + PyInstaller
-        run: pip3 install --break-system-packages pyinstaller opencv-python-headless numpy
-
-      - name: Build standalone binary (x64)
-        run: |
-          python3 -m PyInstaller --onefile --name stabilizer_x64 \
-            --distpath dist-py \
-            --workpath /tmp/pyinstaller-x64 \
-            --specpath /tmp \
-            src/stabilizer_cli.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stabilizer-x64
-          path: dist-py/stabilizer_x64
-
-  # ── Build DMGs with both binaries bundled ─────────────────────────────────
+  # ── Build DMGs with binary bundled ────────────────────────────────────────
   build:
-    needs: [python-arm64, python-x64]
+    needs: [python-binary]
     runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Python binaries
+      - name: Download Python binary
         uses: actions/download-artifact@v4
         with:
-          pattern: stabilizer-*
+          name: stabilizer-universal
           path: dist-py
-          merge-multiple: true
 
-      - name: Make binaries executable
-        run: chmod +x dist-py/stabilizer_arm64 dist-py/stabilizer_x64
+      - name: Make binary executable
+        run: chmod +x dist-py/stabilizer
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

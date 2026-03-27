@@ -121,8 +121,7 @@ ipcMain.handle('start-process', (event, opts) => {
   // In dev fall back to python3 + script.
   let executable, args;
   if (app.isPackaged) {
-    const binaryName = process.arch === 'arm64' ? 'stabilizer_arm64' : 'stabilizer_x64';
-    executable = path.join(process.resourcesPath, binaryName);
+    executable = path.join(process.resourcesPath, 'stabilizer');
     args = [
       '--input',       opts.input,
       '--output',      opts.output,
