@@ -79,7 +79,7 @@ jobs:
         working-directory: electron
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          npm version "$TAG" --no-git-tag-version
+          npm version "$TAG" --no-git-tag-version || true
 
       - name: Build DMGs (arm64 + x64)
         working-directory: electron
