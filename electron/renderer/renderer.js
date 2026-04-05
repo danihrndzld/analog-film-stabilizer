@@ -14,8 +14,9 @@ const progressBar   = document.getElementById('progressBar');
 const progressPct   = document.getElementById('progressPct');
 const logLines      = document.getElementById('logLines');
 const logEmpty      = document.getElementById('logEmpty');
-const paramsSection = document.getElementById('paramsSection');
-const filmFormatEl  = document.getElementById('filmFormat');
+const paramsSection    = document.getElementById('paramsSection');
+const filmFormatEl     = document.getElementById('filmFormat');
+const debugFramesPathEl = document.getElementById('debugFramesPath');
 
 // ── Version badge ─────────────────────────────────────────────────────────────
 const versionBadge = document.getElementById('appVersion');
@@ -109,8 +110,14 @@ async function browseOutput() {
   if (folder) outputPathEl.value = folder;
 }
 
+async function browseDebug() {
+  const folder = await window.api.openFolder();
+  if (folder) debugFramesPathEl.value = folder;
+}
+
 document.getElementById('browseInput').addEventListener('click', browseInput);
 document.getElementById('browseOutput').addEventListener('click', browseOutput);
+document.getElementById('browseDebug').addEventListener('click', browseDebug);
 
 // Clicking anywhere on the drop zone (not on buttons) also triggers browse
 dropZone.addEventListener('click', (e) => {
@@ -167,11 +174,12 @@ function startProcess() {
   window.api.startProcess({
     input,
     output,
-    roi:       parseFloat(document.getElementById('paramRoi').value)       || 0.22,
-    threshold: parseInt(document.getElementById('paramThreshold').value, 10) || 210,
-    smooth:    parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
-    quality:    parseInt(document.getElementById('paramQuality').value, 10),  // 0 is valid (PNG)
-    filmFormat: filmFormatEl.value || 'super8',
+    roi:         parseFloat(document.getElementById('paramRoi').value)       || 0.22,
+    threshold:   parseInt(document.getElementById('paramThreshold').value, 10) || 210,
+    smooth:      parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
+    quality:     parseInt(document.getElementById('paramQuality').value, 10),  // 0 is valid (PNG)
+    filmFormat:  filmFormatEl.value || 'super8',
+    debugFrames: debugFramesPathEl.value.trim(),
   });
 }
 
