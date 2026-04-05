@@ -255,40 +255,20 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
             _save_debug_frame(roi, rejections, frame_name, debug_dir)
         return None
 
-    # ── Super 8: single perforation — Otsu primary, adaptive fallback ──────────
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    # ── Super 8: single perforation ────────────────────────────────────────────
+    # thresh_band() runs Otsu and falls back to adaptive when Otsu produces an
+    # all-black OR near-saturated (>95 % white) result, covering overexposed frames.
+    binary = thresh_band(roi)
 
     if debug_dir:
-        pt, rejections = _best_contour(thresh, roi_w, top_n=1, collect_rejections=True)
+        pt, rejections = _best_contour(binary, roi_w, top_n=1, collect_rejections=True)
     else:
-        pt = _best_contour(thresh, roi_w, top_n=1)
+        pt = _best_contour(binary, roi_w, top_n=1)
         rejections = []
 
     if pt is not None:
         return (float(pt[0]), float(pt[1]))
 
-    block = max(51, (min(h, roi_w) // 20) | 1)
-    adaptive = cv2.adaptiveThreshold(
-        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, -5
-    )
-    adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_OPEN, kernel)
-    adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel)
-
-    if debug_dir:
-        pt, more_rejections = _best_contour(adaptive, roi_w, top_n=1,
-                                            collect_rejections=True)
-        rejections.extend(more_rejections)
-    else:
-        pt = _best_contour(adaptive, roi_w, top_n=1)
-
-    if pt is not None:
-        return (float(pt[0]), float(pt[1]))
-
-    # Both Otsu and adaptive failed.
     if debug_dir and frame_name:
         _save_debug_frame(roi, rejections, frame_name, debug_dir)
     return None
