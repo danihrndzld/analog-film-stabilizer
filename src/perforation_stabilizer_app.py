@@ -318,13 +318,24 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
             rejections = []
 
         if len(candidates) >= 1:
-            # Always use the topmost qualifying perforation (smallest cy).
-            # Scanning top_n=2 maximises detection recall, but we anchor to
-            # the topmost candidate so the reference is consistent regardless
-            # of whether 1 or 2 perfs are visible in a given frame.  Averaging
-            # a midpoint caused large vertical anchor jumps when detection
-            # count varied frame-to-frame.
+            # Always anchor to the topmost qualifying perforation (smallest cy).
+            # Scanning top_n=2 maximises recall; we pick the topmost so the
+            # reference stays consistent across frames regardless of how many
+            # perfs are visible.
             pt_top = min(candidates, key=lambda p: p[1])
+
+            # Position guard: for 8mm/super16 with 2 perfs, the top perf sits
+            # in the upper half of the frame.  If a single candidate lands in
+            # the bottom half it is almost certainly the bottom perforation
+            # (the top one was occluded/underexposed).  Using it as the anchor
+            # would introduce a jump of ~half the inter-perf distance.  Treat
+            # such frames as failed detections so the interpolation pass handles
+            # them instead.
+            if len(candidates) == 1 and pt_top[1] > h * 0.5:
+                if debug_dir and frame_name:
+                    _save_debug_frame(roi, rejections, frame_name, debug_dir)
+                return None
+
             return (float(pt_top[0]), float(pt_top[1]))
 
         # No qualifying contour found.
@@ -406,6 +417,20 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
         target_y = float(manual_anchor[1])
         log(f"Usando referencia manual: x={target_x:.2f}, y={target_y:.2f}")
     else:
+        # IQR outlier rejection: drop positions outside [Q1 - 1.5·IQR, Q3 + 1.5·IQR]
+        # before computing the median.  This removes residual wrong-perf detections
+        # (e.g. bottom-perf anchors that slipped past the position guard) without
+        # affecting batches where all anchors are tightly clustered.
+        ys_valid = np.array([p[1] for p in valid], dtype=np.float32)
+        q1, q3 = float(np.percentile(ys_valid, 25)), float(np.percentile(ys_valid, 75))
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        inliers = [p for p in valid if lo <= p[1] <= hi]
+        if len(inliers) < len(valid):
+            log(f"IQR: descartados {len(valid) - len(inliers)} anclas atípicas "
+                f"(fuera de [{lo:.0f}, {hi:.0f}] px)")
+        if inliers:
+            valid = inliers
         target_x = float(np.median([p[0] for p in valid]))
         target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
