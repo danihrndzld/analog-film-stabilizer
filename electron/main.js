@@ -133,6 +133,10 @@ ipcMain.handle('start-process', (event, opts) => {
       '--film-format', String(opts.filmFormat || 'super8'),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
+    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
+      args.push('--manual-anchor-x', String(opts.manualAnchorX),
+                '--manual-anchor-y', String(opts.manualAnchorY));
+    }
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
@@ -147,6 +151,10 @@ ipcMain.handle('start-process', (event, opts) => {
       '--film-format', String(opts.filmFormat || 'super8'),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
+    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
+      args.push('--manual-anchor-x', String(opts.manualAnchorX),
+                '--manual-anchor-y', String(opts.manualAnchorY));
+    }
   }
 
   pyProcess = spawn(executable, args);
