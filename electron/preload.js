@@ -19,6 +19,12 @@ contextBridge.exposeInMainWorld('api', {
   /** Kill the running Python process */
   cancelProcess: () => ipcRenderer.invoke('cancel-process'),
 
+  /** Run single-frame detection and return annotated preview result */
+  previewFrame: (opts) => ipcRenderer.invoke('preview-frame', opts),
+
+  /** Return path of the first image file in a folder, or null */
+  listFirstFrame: (folderPath) => ipcRenderer.invoke('list-first-frame', folderPath),
+
   // ── Event listeners (renderer → subscribe) ──────────────────────────────
   onProgress: (cb) => ipcRenderer.on('process-progress', (_e, v)  => cb(v)),
   onLog:      (cb) => ipcRenderer.on('process-log',      (_e, m)  => cb(m)),
