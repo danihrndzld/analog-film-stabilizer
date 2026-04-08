@@ -168,6 +168,11 @@ async function triggerPreview() {
   const input = inputPathEl.value.trim();
   if (!input) return;
 
+  // Reset anchor state immediately so a stale anchor from a previous folder
+  // is never used if the user hits run during the async "Analizando…" window.
+  previewAnchor      = null;
+  autoDetectedAnchor = null;
+
   previewSection.hidden = false;
   previewStatusEl.textContent = 'Analizando…';
   anchorDot.hidden = true;
