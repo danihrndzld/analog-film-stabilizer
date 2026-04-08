@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self' 'unsafe-inline';">
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file:;">
   <title>Perforation Stabilizer</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -124,6 +124,25 @@
         </select>
         <span class="format-hint" id="filmFormatHint">determina en qué lado se busca la perforación</span>
       </div>
+
+      <!-- Preview: reference detection panel -->
+      <section class="preview-section" id="previewSection" hidden
+               aria-label="Vista previa de detección de perforación">
+        <div class="preview-header">
+          <span class="preview-label">Referencia de estabilización</span>
+          <span class="preview-status" id="previewStatus">Analizando…</span>
+          <div class="preview-actions">
+            <button class="btn-secondary btn-secondary--sm" id="previewRefreshBtn" type="button">Actualizar</button>
+            <button class="btn-secondary btn-secondary--sm preview-reset-btn" id="previewResetBtn" type="button" hidden>Restablecer</button>
+          </div>
+        </div>
+        <div class="preview-img-wrap" id="previewImgWrap">
+          <img class="preview-img" id="previewImg"
+               alt="Vista previa de detección de perforación en primer frame">
+          <div class="anchor-dot" id="anchorDot" hidden aria-hidden="true"></div>
+        </div>
+        <p class="preview-hint">Haz clic en la imagen para ajustar el punto de referencia manualmente</p>
+      </section>
 
       <!-- Advanced params -->
       <details class="params-section" id="paramsSection">

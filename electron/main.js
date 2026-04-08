@@ -133,6 +133,10 @@ ipcMain.handle('start-process', (event, opts) => {
       '--film-format', String(opts.filmFormat || 'super8'),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
+    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
+      args.push('--manual-anchor-x', String(opts.manualAnchorX),
+                '--manual-anchor-y', String(opts.manualAnchorY));
+    }
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
@@ -147,6 +151,10 @@ ipcMain.handle('start-process', (event, opts) => {
       '--film-format', String(opts.filmFormat || 'super8'),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
+    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
+      args.push('--manual-anchor-x', String(opts.manualAnchorX),
+                '--manual-anchor-y', String(opts.manualAnchorY));
+    }
   }
 
   pyProcess = spawn(executable, args);
@@ -216,6 +224,78 @@ ipcMain.handle('cancel-process', () => {
   if (pyProcess) {
     pyProcess.kill('SIGTERM');
     pyProcess = null;
+  }
+});
+
+// ── IPC: Single-frame preview ─────────────────────────────────────────────────
+// Runs --mode preview on one frame; returns { detected, cx, cy, previewPath }.
+ipcMain.handle('preview-frame', (event, opts) => {
+  const previewOut = path.join(os.tmpdir(), 'stabilizer_preview.jpg');
+
+  let executable, args;
+  if (app.isPackaged) {
+    const binaryName = process.arch === 'arm64' ? 'stabilizer_arm64' : 'stabilizer_x64';
+    executable = path.join(process.resourcesPath, binaryName);
+    args = [
+      '--mode',        'preview',
+      '--frame-path',  opts.framePath,
+      '--preview-out', previewOut,
+      '--roi',         String(opts.roi        || 0.22),
+      '--threshold',   String(opts.threshold  || 210),
+      '--film-format', String(opts.filmFormat || 'super8'),
+    ];
+  } else {
+    const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
+    executable = 'python3';
+    args = [
+      scriptPath,
+      '--mode',        'preview',
+      '--frame-path',  opts.framePath,
+      '--preview-out', previewOut,
+      '--roi',         String(opts.roi        || 0.22),
+      '--threshold',   String(opts.threshold  || 210),
+      '--film-format', String(opts.filmFormat || 'super8'),
+    ];
+  }
+
+  return new Promise((resolve) => {
+    let stdout = '';
+    const proc = spawn(executable, args);
+    proc.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+    proc.on('error', (err) => {
+      resolve({ detected: false, error: err.message });
+    });
+    proc.on('close', () => {
+      try {
+        const line = stdout.trim().split('\n').find(l => l.trim());
+        const msg  = JSON.parse(line);
+        resolve({
+          detected:    msg.detected    || false,
+          cx:          msg.cx          ?? null,
+          cy:          msg.cy          ?? null,
+          previewPath: msg.previewPath ?? null,
+        });
+      } catch {
+        resolve({ detected: false, error: 'Failed to parse preview result' });
+      }
+    });
+  });
+});
+
+// ── IPC: First image file in a folder ────────────────────────────────────────
+// Returns the full path of the lexicographically first image file, or null.
+ipcMain.handle('list-first-frame', (event, folderPath) => {
+  const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp']);
+  try {
+    const entries = fs.readdirSync(folderPath).sort();
+    for (const name of entries) {
+      if (IMAGE_EXTS.has(path.extname(name).toLowerCase())) {
+        return path.join(folderPath, name);
+      }
+    }
+    return null;
+  } catch {
+    return null;
   }
 });
 

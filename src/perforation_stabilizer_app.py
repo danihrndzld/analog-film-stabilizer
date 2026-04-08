@@ -169,15 +169,93 @@ def _save_debug_frame(roi_bgr, rejections, frame_name, debug_dir):
         pass
 
 
+def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=''):
+    """Return an annotated copy of an ROI-crop image for the UI preview panel.
+
+    When anchor is not None (detection succeeded), draws a green crosshair and
+    a "DETECTADO" label at the anchor position.  When anchor is None, draws
+    rejected contour bounding rects in red with reason labels and a "NO
+    DETECTADO" overlay — mirroring the _save_debug_frame style.
+
+    Does NOT write to disk; the caller is responsible for saving.
+
+    Parameters
+    ----------
+    roi_bgr : np.ndarray
+        BGR ROI crop (left strip of the source frame).
+    anchor : tuple(float, float) or None
+        Detected anchor (cx, cy) in full-frame coordinates, or None.
+    rejections : list of (x, y, bw, bh, reason_str)
+        Rejected contour info from _best_contour(collect_rejections=True).
+    frame_name : str
+        Source frame basename used for the filename overlay label.
+
+    Returns
+    -------
+    np.ndarray  annotated BGR image with same shape as roi_bgr.
+    """
+    img = roi_bgr.copy()
+    h, w = img.shape[:2]
+
+    font_scale = max(0.3, h / 3000.0)
+    thickness  = 1
+
+    # Frame-name overlay (top-left, yellow)
+    if frame_name:
+        overlay_y = max(16, int(h * 0.015))
+        cv2.putText(img, frame_name, (4, overlay_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, max(0.4, h / 2500.0),
+                    (0, 255, 255), thickness, cv2.LINE_AA)
+
+    if anchor is not None:
+        cx, cy = int(round(anchor[0])), int(round(anchor[1]))
+        color_found = (0, 220, 0)  # green
+
+        # Crosshair
+        cv2.line(img, (0, cy),  (w, cy),  color_found, 1, cv2.LINE_AA)
+        cv2.line(img, (cx, 0), (cx, h),  color_found, 1, cv2.LINE_AA)
+
+        # Small filled circle at intersection
+        cv2.circle(img, (cx, cy), max(4, int(h * 0.005)), color_found, -1, cv2.LINE_AA)
+
+        # Label
+        label_y = max(cy - 8, int(font_scale * 20))
+        cv2.putText(img, "DETECTADO", (max(0, cx + 6), label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                    color_found, thickness, cv2.LINE_AA)
+    else:
+        # Draw rejection boxes in red
+        for rx, ry, rbw, rbh, reason in rejections:
+            cv2.rectangle(img, (rx, ry), (rx + rbw, ry + rbh), (0, 0, 255), 2)
+            label_y = max(ry - 4, int(font_scale * 20))
+            cv2.putText(img, reason, (rx, label_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                        (0, 0, 255), thickness, cv2.LINE_AA)
+
+        # "NO DETECTADO" banner
+        banner_y = min(h - 8, int(h * 0.95))
+        cv2.putText(img, "NO DETECTADO", (4, banner_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, max(0.5, h / 2000.0),
+                    (0, 0, 255), 2, cv2.LINE_AA)
+
+    return img
+
+
 def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8',
                        debug_dir=None, frame_name=''):
     """Detect the perforation anchor point in a frame.
 
     film_format values:
       'super8'  — 1 perf, left ROI (default)
-      '8mm'     — 2 perfs per frame, left ROI; midpoint used as anchor
-      'super16' — 2 perfs per frame, left ROI; midpoint used as anchor
+      '8mm'     — 2 perfs per frame, left ROI; TOPMOST qualifying perf used as anchor
+      'super16' — 2 perfs per frame, left ROI; TOPMOST qualifying perf used as anchor
     All formats scan the left side — perforations are always on the left.
+
+    For '8mm' and 'super16', up to 2 candidates are found but the one with the
+    smallest cy (closest to the top of the frame) is always returned.  This gives
+    a consistent anchor regardless of how many perforations are visible in a given
+    frame, eliminating the midpoint-vs-centroid inconsistency that caused large
+    vertical anchor jumps when frame-to-frame detection count varied.
 
     When debug_dir and frame_name are provided, a failed detection (return None)
     causes an annotated ROI-crop JPEG to be written to debug_dir showing all
@@ -239,16 +317,15 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
             )
             rejections = []
 
-        if len(candidates) == 2:
-            # Sort by cy to assign top/bottom; average their centroids.
-            # NOTE: no "+ mid" offset — all cy values are full-frame coords.
-            pt_top, pt_bot = sorted(candidates, key=lambda p: p[1])
-            cx = (pt_top[0] + pt_bot[0]) / 2.0
-            cy = (pt_top[1] + pt_bot[1]) / 2.0
-            return (float(cx), float(cy))
-        if len(candidates) == 1:
-            # One perf visible (the other may be obstructed); use its centroid.
-            return (float(candidates[0][0]), float(candidates[0][1]))
+        if len(candidates) >= 1:
+            # Always use the topmost qualifying perforation (smallest cy).
+            # Scanning top_n=2 maximises detection recall, but we anchor to
+            # the topmost candidate so the reference is consistent regardless
+            # of whether 1 or 2 perfs are visible in a given frame.  Averaging
+            # a midpoint caused large vertical anchor jumps when detection
+            # count varied frame-to-frame.
+            pt_top = min(candidates, key=lambda p: p[1])
+            return (float(pt_top[0]), float(pt_top[1]))
 
         # No qualifying contour found.
         if debug_dir and frame_name:
@@ -276,7 +353,8 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
 def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
                      roi_ratio=0.22, threshold=210, smooth_radius=9,
-                     jpeg_quality=0, film_format='super8', debug_dir=None):
+                     jpeg_quality=0, film_format='super8', debug_dir=None,
+                     manual_anchor=None):
     files = list_images(input_dir)
     if not files:
         raise RuntimeError("No encontré imágenes dentro de la carpeta.")
@@ -322,9 +400,14 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
     if not valid:
         raise RuntimeError("No logré detectar la perforación en ningún frame.")
 
-    # Compute robust target from all valid detections (ignore smoothing for the anchor)
-    target_x = float(np.median([p[0] for p in valid]))
-    target_y = float(np.median([p[1] for p in valid]))
+    # Compute robust target: use manual anchor when provided, otherwise median of detections.
+    if manual_anchor is not None:
+        target_x = float(manual_anchor[0])
+        target_y = float(manual_anchor[1])
+        log(f"Usando referencia manual: x={target_x:.2f}, y={target_y:.2f}")
+    else:
+        target_x = float(np.median([p[0] for p in valid]))
+        target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
 
     # Fill None positions (failed detections) by linear interpolation.

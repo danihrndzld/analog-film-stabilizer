@@ -18,6 +18,14 @@ const paramsSection    = document.getElementById('paramsSection');
 const filmFormatEl     = document.getElementById('filmFormat');
 const debugFramesPathEl = document.getElementById('debugFramesPath');
 
+// ── Preview panel refs ────────────────────────────────────────────────────────
+const previewSection    = document.getElementById('previewSection');
+const previewStatusEl   = document.getElementById('previewStatus');
+const previewImg        = document.getElementById('previewImg');
+const anchorDot         = document.getElementById('anchorDot');
+const previewRefreshBtn = document.getElementById('previewRefreshBtn');
+const previewResetBtn   = document.getElementById('previewResetBtn');
+
 // ── Version badge ─────────────────────────────────────────────────────────────
 const versionBadge = document.getElementById('appVersion');
 if (versionBadge && window.api.version) {
@@ -49,7 +57,9 @@ window.api.onUpdateNotFound(() => {
 });
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let isRunning = false;
+let isRunning          = false;
+let previewAnchor      = null;   // null | { x, y } in frame coords (manual override)
+let autoDetectedAnchor = null;   // null | { x, y } from last Python detection
 
 // ── Prevent Electron from navigating when files land outside the drop zone ────
 document.addEventListener('dragover', (e) => e.preventDefault());
@@ -149,7 +159,101 @@ function setInputFolder(folderPath) {
   runBtn.removeAttribute('aria-disabled');
 
   addLog(`Carpeta seleccionada: ${folderPath}`);
+  triggerPreview();
 }
+
+// ── Preview panel ─────────────────────────────────────────────────────────────
+
+async function triggerPreview() {
+  const input = inputPathEl.value.trim();
+  if (!input) return;
+
+  // Reset anchor state immediately so a stale anchor from a previous folder
+  // is never used if the user hits run during the async "Analizando…" window.
+  previewAnchor      = null;
+  autoDetectedAnchor = null;
+
+  previewSection.hidden = false;
+  previewStatusEl.textContent = 'Analizando…';
+  anchorDot.hidden = true;
+  previewResetBtn.hidden = true;
+
+  const firstFrame = await window.api.listFirstFrame(input);
+  if (!firstFrame) {
+    previewStatusEl.textContent = 'No se encontraron imágenes en la carpeta';
+    return;
+  }
+
+  let result;
+  try {
+    result = await window.api.previewFrame({
+      framePath:  firstFrame,
+      roi:        parseFloat(document.getElementById('paramRoi').value)        || 0.22,
+      threshold:  parseInt(document.getElementById('paramThreshold').value, 10) || 210,
+      filmFormat: filmFormatEl.value || 'super8',
+    });
+  } catch {
+    previewStatusEl.textContent = 'Error al analizar el frame';
+    return;
+  }
+
+  if (result.previewPath) {
+    // Cache-bust so Electron reloads even when path is reused across calls
+    previewImg.src = 'file://' + result.previewPath + '?t=' + Date.now();
+  }
+
+  if (result.detected) {
+    autoDetectedAnchor = { x: result.cx, y: result.cy };
+    previewAnchor      = autoDetectedAnchor;
+    previewStatusEl.textContent =
+      `Auto: (${Math.round(result.cx)}, ${Math.round(result.cy)})`;
+  } else {
+    autoDetectedAnchor = null;
+    previewAnchor      = null;
+    previewStatusEl.textContent = 'No detectado — haz clic para marcar manualmente';
+  }
+}
+
+// Re-detect when film format changes (different format → different detection params)
+filmFormatEl.addEventListener('change', () => {
+  previewAnchor = null;
+  triggerPreview();
+});
+
+// Actualizar: re-run preview with current advanced params
+previewRefreshBtn.addEventListener('click', () => {
+  previewAnchor = null;
+  triggerPreview();
+});
+
+// Restablecer: revert manual override to last auto-detected anchor
+previewResetBtn.addEventListener('click', () => {
+  previewAnchor  = autoDetectedAnchor;
+  anchorDot.hidden = true;
+  previewResetBtn.hidden = true;
+  previewStatusEl.textContent = autoDetectedAnchor
+    ? `Auto: (${Math.round(autoDetectedAnchor.x)}, ${Math.round(autoDetectedAnchor.y)})`
+    : 'No detectado — haz clic para marcar manualmente';
+});
+
+// Click-to-set-anchor: map click position back to frame coordinates
+previewImg.addEventListener('click', (e) => {
+  if (!previewImg.naturalWidth) return;  // image not yet loaded
+  const scaleX = previewImg.naturalWidth  / previewImg.offsetWidth;
+  const scaleY = previewImg.naturalHeight / previewImg.offsetHeight;
+  const frameX = e.offsetX * scaleX;
+  const frameY = e.offsetY * scaleY;
+
+  previewAnchor = { x: frameX, y: frameY };
+
+  anchorDot.style.left = e.offsetX + 'px';
+  anchorDot.style.top  = e.offsetY + 'px';
+  anchorDot.hidden = false;
+
+  previewStatusEl.textContent =
+    `Manual: (${Math.round(frameX)}, ${Math.round(frameY)})`;
+  previewResetBtn.hidden = autoDetectedAnchor === null;
+});
 
 // ── Run / Cancel ──────────────────────────────────────────────────────────────
 runBtn.addEventListener('click', () => {
@@ -174,12 +278,14 @@ function startProcess() {
   window.api.startProcess({
     input,
     output,
-    roi:         parseFloat(document.getElementById('paramRoi').value)       || 0.22,
-    threshold:   parseInt(document.getElementById('paramThreshold').value, 10) || 210,
-    smooth:      parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
-    quality:     parseInt(document.getElementById('paramQuality').value, 10),  // 0 is valid (PNG)
-    filmFormat:  filmFormatEl.value || 'super8',
-    debugFrames: debugFramesPathEl.value.trim(),
+    roi:           parseFloat(document.getElementById('paramRoi').value)        || 0.22,
+    threshold:     parseInt(document.getElementById('paramThreshold').value, 10) || 210,
+    smooth:        parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
+    quality:       parseInt(document.getElementById('paramQuality').value, 10),  // 0 is valid (PNG)
+    filmFormat:    filmFormatEl.value || 'super8',
+    debugFrames:   debugFramesPathEl.value.trim(),
+    manualAnchorX: previewAnchor?.x ?? null,
+    manualAnchorY: previewAnchor?.y ?? null,
   });
 }
 

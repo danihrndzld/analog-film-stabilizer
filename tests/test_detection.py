@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from perforation_stabilizer_app import (
+    _annotate_roi_preview,
     _best_contour,
     detect_perforation,
     stabilize_folder,
@@ -153,17 +154,73 @@ class TestBestContour:
         assert isinstance(rej, list)
 
 
-# ── Unit 2: detect_perforation ────────────────────────────────────────────────
+# ── Unit 2: _annotate_roi_preview ────────────────────────────────────────────
+
+class TestAnnotateRoiPreview:
+
+    def _make_roi(self, h=600, w=200):
+        return np.zeros((h, w, 3), dtype=np.uint8)
+
+    def test_detected_returns_same_shape_and_dtype(self):
+        roi = self._make_roi()
+        result = _annotate_roi_preview(roi, anchor=(80, 300), rejections=[], frame_name="test.jpg")
+        assert result.shape == roi.shape
+        assert result.dtype == roi.dtype
+
+    def test_detected_has_green_pixels_near_anchor(self):
+        """Green crosshair should produce non-zero green channel pixels at anchor coords."""
+        roi = self._make_roi()
+        cx, cy = 80, 300
+        result = _annotate_roi_preview(roi, anchor=(cx, cy), rejections=[])
+        # Green channel (index 1) along the horizontal crosshair line at cy
+        assert result[cy, cx, 1] > 100  # green component prominent
+
+    def test_no_detection_returns_same_shape(self):
+        roi = self._make_roi()
+        rejections = [(10, 50, 40, 60, "area")]
+        result = _annotate_roi_preview(roi, anchor=None, rejections=rejections)
+        assert result.shape == roi.shape
+
+    def test_no_detection_has_red_pixels_from_rejection_box(self):
+        """Red channel should be prominent on rejection bounding rect."""
+        roi = self._make_roi()
+        rejections = [(10, 50, 40, 60, "fill")]
+        result = _annotate_roi_preview(roi, anchor=None, rejections=rejections)
+        # Red channel (index 2) should be non-zero near the rejection box
+        region = result[50:111, 10:51, 2]
+        assert region.max() > 100
+
+    def test_does_not_modify_input(self):
+        """The function must not mutate the input roi_bgr array."""
+        roi = self._make_roi()
+        original = roi.copy()
+        _annotate_roi_preview(roi, anchor=(50, 200), rejections=[])
+        assert np.array_equal(roi, original)
+
+
+# ── Unit 3: detect_perforation ────────────────────────────────────────────────
 
 class TestDetectPerforation:
 
-    def test_8mm_two_perfs_returns_midpoint(self):
-        """Two well-separated perforations → midpoint y near frame centre."""
+    def test_8mm_two_perfs_returns_topmost_not_midpoint(self):
+        """Two well-separated perforations → anchor is the TOPMOST perf, not midpoint."""
         frame = make_frame([0.25, 0.75])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
-        # Midpoint y ≈ 0.50 × FRAME_H = 500
-        assert abs(pt[1] - FRAME_H * 0.50) < FRAME_H * 0.08
+        # Topmost perf y ≈ 0.25 × FRAME_H = 250, NOT the midpoint 500
+        assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
+        # Explicitly verify it's NOT the midpoint
+        assert abs(pt[1] - FRAME_H * 0.50) > FRAME_H * 0.10
+
+    def test_8mm_anchor_consistent_single_vs_double_perf(self):
+        """Frame with 2 perfs and frame with only top perf both return anchor near same y."""
+        frame_two = make_frame([0.25, 0.75])
+        frame_one = make_frame([0.25])  # only top perf visible
+        pt_two = detect_perforation(frame_two, film_format="8mm")
+        pt_one = detect_perforation(frame_one, film_format="8mm")
+        assert pt_two is not None and pt_one is not None
+        # Both anchors should be near the top perf position — delta < 15 px
+        assert abs(pt_two[1] - pt_one[1]) < 15
 
     def test_8mm_perf_near_midline_both_found(self):
         """Root-cause fix: perfs near h//2 are detected (old split would miss them)."""
