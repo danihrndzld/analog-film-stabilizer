@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--quality",     type=int,   default=95,                          help="JPEG quality 1-100, 0=PNG (default 95)")
     parser.add_argument("--film-format", choices=["super8", "8mm", "super16"], default="super8",
                         help="Film format: super8 (default), 8mm, super16")
+    parser.add_argument("--debug-frames", default=None, metavar="DIR",
+                        help="Optional folder to save annotated debug JPEGs for failed detections")
     args = parser.parse_args()
 
     try:
@@ -51,6 +53,7 @@ def main():
             smooth_radius=args.smooth,
             jpeg_quality=args.quality,
             film_format=args.film_format,
+            debug_dir=args.debug_frames,
         )
         emit({"type": "done", "summary": summary})
     except Exception as exc:

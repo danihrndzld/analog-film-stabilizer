@@ -132,6 +132,7 @@ ipcMain.handle('start-process', (event, opts) => {
       '--quality',     String(opts.quality),
       '--film-format', String(opts.filmFormat || 'super8'),
     ];
+    if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
@@ -145,6 +146,7 @@ ipcMain.handle('start-process', (event, opts) => {
       '--quality',     String(opts.quality),
       '--film-format', String(opts.filmFormat || 'super8'),
     ];
+    if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
   }
 
   pyProcess = spawn(executable, args);
