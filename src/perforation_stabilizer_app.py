@@ -6,6 +6,12 @@ import numpy as np
 
 VALID_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
 
+# Minimum contour area as a fraction of ROI area.  Calibrated so that at
+# ~3000×2000 frames with roi_ratio=0.22 the effective floor ≈ 5 280 px,
+# close to the previous hard-coded 5 000.
+_MIN_AREA_FRAC = 0.004
+_MIN_AREA_FLOOR = 200  # absolute floor to reject noise at very low resolutions
+
 
 def list_images(folder):
     files = set()
@@ -38,7 +44,7 @@ def moving_average(points, radius=9):
 
 
 def _best_contour(thresh, roi_w, top_n=1, aspect_min=0.40, fill_min=0.75,
-                  collect_rejections=False):
+                  solidity_min=0.85, collect_rejections=False):
     """Return top_n perforation candidates from a binary image as (cx, cy) tuples.
 
     Parameters
@@ -70,13 +76,24 @@ def _best_contour(thresh, roi_w, top_n=1, aspect_min=0.40, fill_min=0.75,
     candidates = []
     rejections = []
 
+    roi_h = thresh.shape[0]
+    min_area = max(_MIN_AREA_FLOOR, int(roi_h * roi_w * _MIN_AREA_FRAC))
+
     for cnt in contours:
         area = cv2.contourArea(cnt)
         x, y, bw, bh = cv2.boundingRect(cnt)
 
-        if area < 5000:
+        if area < min_area:
             if collect_rejections:
                 rejections.append((x, y, bw, bh, "area"))
+            continue
+
+        hull = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / (hull_area + 1e-6)
+        if solidity < solidity_min:
+            if collect_rejections:
+                rejections.append((x, y, bw, bh, "solidity"))
             continue
 
         # Compute centroid BEFORE the x-position filter so we use the true
@@ -274,6 +291,8 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
         a meaningful threshold.
         """
         gray = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         _, t = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         t = cv2.morphologyEx(t, cv2.MORPH_OPEN, kernel)
@@ -307,13 +326,13 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
         if debug_dir:
             candidates, rejections = _best_contour(
                 binary, roi_w, top_n=2,
-                aspect_min=0.25, fill_min=0.65,
+                aspect_min=0.25, fill_min=0.65, solidity_min=0.80,
                 collect_rejections=True,
             )
         else:
             candidates = _best_contour(
                 binary, roi_w, top_n=2,
-                aspect_min=0.25, fill_min=0.65,
+                aspect_min=0.25, fill_min=0.65, solidity_min=0.80,
             )
             rejections = []
 
@@ -362,10 +381,17 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
     return None
 
 
+_BORDER_MODES = {
+    'replicate': cv2.BORDER_REPLICATE,
+    'constant':  cv2.BORDER_CONSTANT,
+    'reflect':   cv2.BORDER_REFLECT_101,
+}
+
+
 def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
                      roi_ratio=0.22, threshold=210, smooth_radius=9,
                      jpeg_quality=0, film_format='super8', debug_dir=None,
-                     manual_anchor=None):
+                     manual_anchor=None, border_mode='replicate'):
     files = list_images(input_dir)
     if not files:
         raise RuntimeError("No encontré imágenes dentro de la carpeta.")
@@ -446,6 +472,7 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
 
     log("Segunda pasada: estabilizando y guardando...")
 
+    cv_border = _BORDER_MODES.get(border_mode, cv2.BORDER_REPLICATE)
     out_w = out_h = None
 
     for i, f in enumerate(files, 1):
@@ -466,8 +493,7 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
                 M,
                 (w, h),
                 flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=(0, 0, 0),
+                borderMode=cv_border,
             )
 
             basename = os.path.basename(f)
@@ -490,6 +516,7 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
         "output_height": out_h,
         "output_format": "png (lossless)" if jpeg_quality == 0 else f"jpeg q{jpeg_quality}",
         "film_format": film_format,
+        "border_mode": border_mode,
     }
 
     with open(os.path.join(output_dir, "stabilization_report.txt"), "w", encoding="utf-8") as f:

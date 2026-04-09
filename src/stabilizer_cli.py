@@ -97,6 +97,7 @@ def run_batch(args):
             film_format=args.film_format,
             debug_dir=args.debug_frames,
             manual_anchor=manual_anchor,
+            border_mode=args.border_mode,
         )
         emit({"type": "done", "summary": summary})
     except Exception as exc:
@@ -133,6 +134,9 @@ def main():
                         help="Override target anchor X (skips median computation)")
     parser.add_argument("--manual-anchor-y", type=float, default=None,
                         help="Override target anchor Y (skips median computation)")
+    parser.add_argument("--border-mode", choices=["replicate", "constant", "reflect"],
+                        default="replicate",
+                        help="Border fill mode for warpAffine (default: replicate)")
 
     # ── Preview-mode params ───────────────────────────────────────────────────
     parser.add_argument("--frame-path",  default=None,

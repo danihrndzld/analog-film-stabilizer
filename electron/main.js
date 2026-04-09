@@ -137,6 +137,7 @@ ipcMain.handle('start-process', (event, opts) => {
       args.push('--manual-anchor-x', String(opts.manualAnchorX),
                 '--manual-anchor-y', String(opts.manualAnchorY));
     }
+    if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
@@ -155,6 +156,7 @@ ipcMain.handle('start-process', (event, opts) => {
       args.push('--manual-anchor-x', String(opts.manualAnchorX),
                 '--manual-anchor-y', String(opts.manualAnchorY));
     }
+    if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
   }
 
   pyProcess = spawn(executable, args);

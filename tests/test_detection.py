@@ -104,7 +104,10 @@ class TestBestContour:
         cv2.rectangle(img, (124, 150), (230, 256), 0, -1)
 
         assert _best_contour(img, roi_w=500, aspect_min=0.25) is None  # fill 0.72 < 0.75
-        result = _best_contour(img, roi_w=500, aspect_min=0.25, fill_min=0.65)
+        # Disable solidity filter (L-shape has low solidity by design) to
+        # isolate the fill_min boundary test.
+        result = _best_contour(img, roi_w=500, aspect_min=0.25, fill_min=0.65,
+                               solidity_min=0.0)
         assert result is not None
 
     def test_centroid_x_filter_uses_cx_not_bounding_rect_x(self):

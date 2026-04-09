@@ -286,6 +286,7 @@ function startProcess() {
     debugFrames:   debugFramesPathEl.value.trim(),
     manualAnchorX: previewAnchor?.x ?? null,
     manualAnchorY: previewAnchor?.y ?? null,
+    borderMode:    document.getElementById('paramBorderMode').value || 'replicate',
   });
 }
 
