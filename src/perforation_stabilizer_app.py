@@ -393,13 +393,14 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
     Detection uses a two-stage cascade:
 
-      1. Edge projection (primary) — Sobel-Y gradient projected to a 1-D
-         row-mean profile.  Exposure-robust: detects the brightness transition
-         at the perf boundary even on overexposed frames where binary
-         thresholding fails.  Runs on all formats before the contour branch.
+      1. Contour detection (primary) — CLAHE + Otsu + adaptive threshold +
+         contour filtering.  The contour centroid averages over the full
+         perforation-hole area, producing stable frame-to-frame measurements.
 
-      2. Contour detection (fallback) — CLAHE + Otsu + adaptive threshold +
-         contour filtering.  Runs only when edge projection returns None.
+      2. Edge projection (fallback) — Sobel-Y gradient projected to a 1-D
+         row-mean profile.  Runs only when contour detection fails (typically
+         overexposed frames where Otsu cannot produce a closed blob).  Detects
+         the perf boundary from brightness transitions rather than blob shape.
 
     film_format values:
       'super8'  — 1 perf, left ROI (default)
@@ -486,32 +487,12 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
     roi = frame[:, :roi_w]
 
-    # ── Primary: edge projection ───────────────────────────────────────────────
-    # Runs on every frame and every format before the contour branch.  Returns
-    # immediately on success so the contour pass is skipped entirely (~84 % of
-    # frames) — collect_rejections is never set on those frames, saving compute.
-    ep_result = _detect_by_edge_projection(
-        roi, h, film_format, roi_w,
-        edge_gauss_sigma=edge_gauss_sigma,
-        edge_peak_thresh_hi=edge_peak_thresh_hi,
-        edge_peak_thresh_lo=edge_peak_thresh_lo,
-    )
-    if ep_result is not None:
-        return ep_result
-
-    # ── Fallback: contour detection ────────────────────────────────────────────
-    # Only reached when edge projection returned None.
-
     if film_format in ('8mm', 'super16'):
-        # Single-pass full-ROI scan — no h//2 split.
-        #
-        # The previous approach bisected the frame at h//2 to isolate the two
-        # perforations.  When a perforation fell near that line its contour was
-        # split across both bands, causing both halves to fail the area/fill
-        # filters and returning None (~10 % of frames for Diego's batches).
-        #
-        # Now we scan the full ROI at once, collect all qualifying contours,
-        # pick the top-2 by score, and assign top/bottom roles by y-position.
+        # ── Primary: contour detection ─────────────────────────────────────────
+        # Single-pass full-ROI scan — no h//2 split.  The contour centroid
+        # averages over the full perf-hole area; it is considerably more stable
+        # frame-to-frame than the gradient peak midpoint produced by edge
+        # projection, which is why contour runs first.
         binary = thresh_band(roi)
 
         if debug_dir:
@@ -546,12 +527,22 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
                 pt_top = min(top_zone, key=lambda p: p[1])
                 return (float(pt_top[0]), float(pt_top[1]))
 
-            # No candidate landed in the top-perf zone → failed detection.
-            if debug_dir and frame_name:
-                _save_debug_frame(roi, rejections, frame_name, debug_dir)
-            return None
+        # ── Fallback: edge projection ──────────────────────────────────────────
+        # Runs only when contour detection found no valid candidate in the top
+        # zone.  Edge projection detects the perf boundary from Sobel gradient
+        # transitions — it recovers overexposed frames where Otsu fails to
+        # produce a closed blob.  collect_rejections is set only here (contour
+        # already failed) to avoid computing rejection lists on successful frames.
+        ep_result = _detect_by_edge_projection(
+            roi, h, film_format, roi_w,
+            edge_gauss_sigma=edge_gauss_sigma,
+            edge_peak_thresh_hi=edge_peak_thresh_hi,
+            edge_peak_thresh_lo=edge_peak_thresh_lo,
+        )
+        if ep_result is not None:
+            return ep_result
 
-        # No qualifying contour found.
+        # Both methods failed — save debug image if requested.
         if debug_dir and frame_name:
             _save_debug_frame(roi, rejections, frame_name, debug_dir)
         return None
@@ -569,6 +560,16 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
     if pt is not None:
         return (float(pt[0]), float(pt[1]))
+
+    # Fallback for Super 8 overexposed frames.
+    ep_result = _detect_by_edge_projection(
+        roi, h, film_format, roi_w,
+        edge_gauss_sigma=edge_gauss_sigma,
+        edge_peak_thresh_hi=edge_peak_thresh_hi,
+        edge_peak_thresh_lo=edge_peak_thresh_lo,
+    )
+    if ep_result is not None:
+        return ep_result
 
     if debug_dir and frame_name:
         _save_debug_frame(roi, rejections, frame_name, debug_dir)
