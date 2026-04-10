@@ -1,0 +1,52 @@
+[project]
+name = "analog-film-stabilizer"
+version = "0.1.0"
+description = "Automated analog film perforation stabilizer"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.4",
+    "opencv-python>=4.13.0.92",
+]
+
+[project.optional-dependencies]
+headless = [
+    "numpy>=2.4.4",
+    "opencv-python-headless>=4.13.0.92",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
+]
+
+[tool.uv]
+required-version = ">=0.4.0"
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+target-version = "py311"
+
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "dist-py",
+    "electron",
+]
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes, UP = pyupgrade, B = bugbear, I = isort, SIM = simplify
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    "E501",   # line-too-long — handled by formatter
+]
+fixable = ["ALL"]
+unfixable = ["F401"]  # unused imports — require manual cleanup
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

@@ -1,5 +1,5 @@
-import os
 import glob
+import os
 
 import cv2
 import numpy as np
@@ -40,11 +40,18 @@ def moving_average(points, radius=9):
     kernel = np.ones(k, dtype=np.float32) / k
     xs_s = np.convolve(np.pad(xs, (radius, radius), mode="edge"), kernel, mode="valid")
     ys_s = np.convolve(np.pad(ys, (radius, radius), mode="edge"), kernel, mode="valid")
-    return list(zip(xs_s.tolist(), ys_s.tolist()))
+    return list(zip(xs_s.tolist(), ys_s.tolist(), strict=True))
 
 
-def _best_contour(thresh, roi_w, top_n=1, aspect_min=0.40, fill_min=0.75,
-                  solidity_min=0.85, collect_rejections=False):
+def _best_contour(
+    thresh,
+    roi_w,
+    top_n=1,
+    aspect_min=0.40,
+    fill_min=0.75,
+    solidity_min=0.85,
+    collect_rejections=False,
+):
     """Return top_n perforation candidates from a binary image as (cx, cy) tuples.
 
     Parameters
@@ -172,31 +179,45 @@ def _save_debug_frame(roi_bgr, rejections, frame_name, debug_dir):
 
         # Scale font to ROI height so labels are legible at any resolution.
         font_scale_reason = max(0.3, h / 3000.0)
-        font_scale_name   = max(0.4, h / 2500.0)
+        font_scale_name = max(0.4, h / 2500.0)
         thickness = 1
 
         for rx, ry, rbw, rbh, reason in rejections:
             cv2.rectangle(img, (rx, ry), (rx + rbw, ry + rbh), (0, 0, 255), 2)
             label_y = max(ry - 4, int(font_scale_reason * 20))
-            cv2.putText(img, reason, (rx, label_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_reason,
-                        (0, 0, 255), thickness, cv2.LINE_AA)
+            cv2.putText(
+                img,
+                reason,
+                (rx, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale_reason,
+                (0, 0, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
 
         # Filename overlay in yellow at the top-left
         overlay_y = max(16, int(h * 0.015))
-        cv2.putText(img, frame_name, (4, overlay_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale_name,
-                    (0, 255, 255), thickness, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            frame_name,
+            (4, overlay_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale_name,
+            (0, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
 
-        basename  = os.path.splitext(frame_name)[0] + "_debug.jpg"
-        out_path  = os.path.join(debug_dir, basename)
+        basename = os.path.splitext(frame_name)[0] + "_debug.jpg"
+        out_path = os.path.join(debug_dir, basename)
         cv2.imwrite(out_path, img, [cv2.IMWRITE_JPEG_QUALITY, 80])
     except Exception:
         # Never let a debug-image write error abort the stabilisation run.
         pass
 
 
-def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=''):
+def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=""):
     """Return an annotated copy of an ROI-crop image for the UI preview panel.
 
     When anchor is not None (detection succeeded), draws a green crosshair and
@@ -225,53 +246,86 @@ def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=''):
     h, w = img.shape[:2]
 
     font_scale = max(0.3, h / 3000.0)
-    thickness  = 1
+    thickness = 1
 
     # Frame-name overlay (top-left, yellow)
     if frame_name:
         overlay_y = max(16, int(h * 0.015))
-        cv2.putText(img, frame_name, (4, overlay_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, max(0.4, h / 2500.0),
-                    (0, 255, 255), thickness, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            frame_name,
+            (4, overlay_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            max(0.4, h / 2500.0),
+            (0, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
 
     if anchor is not None and np.isfinite(anchor[0]) and np.isfinite(anchor[1]):
         cx, cy = int(round(anchor[0])), int(round(anchor[1]))
         color_found = (0, 220, 0)  # green
 
         # Crosshair
-        cv2.line(img, (0, cy),  (w, cy),  color_found, 1, cv2.LINE_AA)
-        cv2.line(img, (cx, 0), (cx, h),  color_found, 1, cv2.LINE_AA)
+        cv2.line(img, (0, cy), (w, cy), color_found, 1, cv2.LINE_AA)
+        cv2.line(img, (cx, 0), (cx, h), color_found, 1, cv2.LINE_AA)
 
         # Small filled circle at intersection
         cv2.circle(img, (cx, cy), max(4, int(h * 0.005)), color_found, -1, cv2.LINE_AA)
 
         # Label
         label_y = max(cy - 8, int(font_scale * 20))
-        cv2.putText(img, "DETECTADO", (max(0, cx + 6), label_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale,
-                    color_found, thickness, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            "DETECTADO",
+            (max(0, cx + 6), label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color_found,
+            thickness,
+            cv2.LINE_AA,
+        )
     else:
         # Draw rejection boxes in red
         for rx, ry, rbw, rbh, reason in rejections:
             cv2.rectangle(img, (rx, ry), (rx + rbw, ry + rbh), (0, 0, 255), 2)
             label_y = max(ry - 4, int(font_scale * 20))
-            cv2.putText(img, reason, (rx, label_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale,
-                        (0, 0, 255), thickness, cv2.LINE_AA)
+            cv2.putText(
+                img,
+                reason,
+                (rx, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (0, 0, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
 
         # "NO DETECTADO" banner
         banner_y = min(h - 8, int(h * 0.95))
-        cv2.putText(img, "NO DETECTADO", (4, banner_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, max(0.5, h / 2000.0),
-                    (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            "NO DETECTADO",
+            (4, banner_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            max(0.5, h / 2000.0),
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
 
     return img
 
 
-def _detect_by_edge_projection(roi_bgr, frame_h, film_format, roi_w,
-                                edge_gauss_sigma=15.0,
-                                edge_peak_thresh_hi=0.60,
-                                edge_peak_thresh_lo=0.15):
+def _detect_by_edge_projection(
+    roi_bgr,
+    frame_h,
+    film_format,
+    roi_w,
+    edge_gauss_sigma=15.0,
+    edge_peak_thresh_hi=0.60,
+    edge_peak_thresh_lo=0.15,
+):
     """Detect a perforation using horizontal Sobel gradient projection.
 
     Applies Sobel-Y to the ROI to detect horizontal brightness transitions,
@@ -337,9 +391,9 @@ def _detect_by_edge_projection(roi_bgr, frame_h, film_format, roi_w,
     gauss_kernel = np.exp(-0.5 * (x / sigma) ** 2)
     gauss_kernel /= gauss_kernel.sum()
     profile_smooth = np.convolve(
-        np.pad(profile, (half_w, half_w), mode='edge'),
+        np.pad(profile, (half_w, half_w), mode="edge"),
         gauss_kernel,
-        mode='valid',
+        mode="valid",
     )
 
     # 4. Guard: all-uniform after smoothing
@@ -355,7 +409,10 @@ def _detect_by_edge_projection(roi_bgr, frame_h, film_format, roi_w,
     peaks = []
     for r in range(min_sep, roi_h - min_sep):
         lo, hi = r - min_sep, r + min_sep
-        if profile_smooth[r] >= profile_smooth[lo:hi + 1].max() and profile_smooth[r] >= threshold:
+        if (
+            profile_smooth[r] >= profile_smooth[lo : hi + 1].max()
+            and profile_smooth[r] >= threshold
+        ):
             peaks.append(r)
 
     if not peaks:
@@ -367,28 +424,34 @@ def _detect_by_edge_projection(roi_bgr, frame_h, film_format, roi_w,
     #    midpoint cy falls within the top-perf zone (< 30 % of frame height).
     #    Take the first valid pair found (topmost).
     for i, r_top in enumerate(peaks):
-        for r_bot in peaks[i + 1:]:
+        for r_bot in peaks[i + 1 :]:
             perf_h = r_bot - r_top
             if perf_h < edge_peak_thresh_lo * roi_h or perf_h > 0.35 * roi_h:
                 continue
             cy = (r_top + r_bot) / 2.0
-            if film_format in ('8mm', 'super16') and cy >= frame_h * 0.30:
+            if film_format in ("8mm", "super16") and cy >= frame_h * 0.30:
                 continue
-            return (float('nan'), float(cy))
+            return (float("nan"), float(cy))
 
     # 7. Super 8 fallback: single centred perf — use topmost peak directly.
     #    Zone guard does not apply for super8.
-    if film_format == 'super8':
-        return (float('nan'), float(peaks[0]))
+    if film_format == "super8":
+        return (float("nan"), float(peaks[0]))
 
     return None
 
 
-def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8',
-                       debug_dir=None, frame_name='',
-                       edge_gauss_sigma=15.0,
-                       edge_peak_thresh_hi=0.60,
-                       edge_peak_thresh_lo=0.15):
+def detect_perforation(
+    frame,
+    roi_ratio=0.22,
+    threshold=210,
+    film_format="super8",
+    debug_dir=None,
+    frame_name="",
+    edge_gauss_sigma=15.0,
+    edge_peak_thresh_hi=0.60,
+    edge_peak_thresh_lo=0.15,
+):
     """Detect the perforation anchor point in a frame.
 
     Detection uses a two-stage cascade:
@@ -459,7 +522,8 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
             if ref_mean > 190:
                 blur_raw = cv2.GaussianBlur(gray_raw, (5, 5), 0)
                 _, t_ref = cv2.threshold(
-                    blur_raw, ref_mean * 0.85, 255, cv2.THRESH_BINARY)
+                    blur_raw, ref_mean * 0.85, 255, cv2.THRESH_BINARY
+                )
                 t_ref = cv2.morphologyEx(t_ref, cv2.MORPH_OPEN, kernel)
                 t_ref = cv2.morphologyEx(t_ref, cv2.MORPH_CLOSE, kernel)
                 nz_ref = cv2.countNonZero(t_ref)
@@ -479,15 +543,16 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
         # ── Tier 3: adaptive threshold ────────────────────────────────────
         block = max(51, (min(bh_b, roi_w) // 20) | 1)
-        a = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, block, -5)
+        a = cv2.adaptiveThreshold(
+            blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, -5
+        )
         a = cv2.morphologyEx(a, cv2.MORPH_OPEN, kernel)
         a = cv2.morphologyEx(a, cv2.MORPH_CLOSE, kernel)
         return a
 
     roi = frame[:, :roi_w]
 
-    if film_format in ('8mm', 'super16'):
+    if film_format in ("8mm", "super16"):
         # ── Primary: contour detection ─────────────────────────────────────────
         # Single-pass full-ROI scan — no h//2 split.  The contour centroid
         # averages over the full perf-hole area; it is considerably more stable
@@ -497,14 +562,22 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
         if debug_dir:
             candidates, rejections = _best_contour(
-                binary, roi_w, top_n=2,
-                aspect_min=0.25, fill_min=0.65, solidity_min=0.80,
+                binary,
+                roi_w,
+                top_n=2,
+                aspect_min=0.25,
+                fill_min=0.65,
+                solidity_min=0.80,
                 collect_rejections=True,
             )
         else:
             candidates = _best_contour(
-                binary, roi_w, top_n=2,
-                aspect_min=0.25, fill_min=0.65, solidity_min=0.80,
+                binary,
+                roi_w,
+                top_n=2,
+                aspect_min=0.25,
+                fill_min=0.65,
+                solidity_min=0.80,
             )
             rejections = []
 
@@ -534,7 +607,10 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
         # produce a closed blob.  collect_rejections is set only here (contour
         # already failed) to avoid computing rejection lists on successful frames.
         ep_result = _detect_by_edge_projection(
-            roi, h, film_format, roi_w,
+            roi,
+            h,
+            film_format,
+            roi_w,
             edge_gauss_sigma=edge_gauss_sigma,
             edge_peak_thresh_hi=edge_peak_thresh_hi,
             edge_peak_thresh_lo=edge_peak_thresh_lo,
@@ -563,7 +639,10 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
     # Fallback for Super 8 overexposed frames.
     ep_result = _detect_by_edge_projection(
-        roi, h, film_format, roi_w,
+        roi,
+        h,
+        film_format,
+        roi_w,
         edge_gauss_sigma=edge_gauss_sigma,
         edge_peak_thresh_hi=edge_peak_thresh_hi,
         edge_peak_thresh_lo=edge_peak_thresh_lo,
@@ -577,16 +656,26 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
 
 
 _BORDER_MODES = {
-    'replicate': cv2.BORDER_REPLICATE,
-    'constant':  cv2.BORDER_CONSTANT,
-    'reflect':   cv2.BORDER_REFLECT_101,
+    "replicate": cv2.BORDER_REPLICATE,
+    "constant": cv2.BORDER_CONSTANT,
+    "reflect": cv2.BORDER_REFLECT_101,
 }
 
 
-def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
-                     roi_ratio=0.22, threshold=210, smooth_radius=9,
-                     jpeg_quality=0, film_format='super8', debug_dir=None,
-                     manual_anchor=None, border_mode='replicate'):
+def stabilize_folder(
+    input_dir,
+    output_dir,
+    progress_cb=None,
+    log_cb=None,
+    roi_ratio=0.22,
+    threshold=210,
+    smooth_radius=9,
+    jpeg_quality=0,
+    film_format="super8",
+    debug_dir=None,
+    manual_anchor=None,
+    border_mode="replicate",
+):
     files = list_images(input_dir)
     if not files:
         raise RuntimeError("No encontré imágenes dentro de la carpeta.")
@@ -648,8 +737,10 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
         lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
         inliers = [p for p in valid if lo <= p[1] <= hi]
         if len(inliers) < len(valid):
-            log(f"IQR: descartados {len(valid) - len(inliers)} anclas atípicas "
-                f"(fuera de [{lo:.0f}, {hi:.0f}] px)")
+            log(
+                f"IQR: descartados {len(valid) - len(inliers)} anclas atípicas "
+                f"(fuera de [{lo:.0f}, {hi:.0f}] px)"
+            )
         if inliers:
             valid = inliers
         xs_for_iqr = np.array([p[0] for p in valid], dtype=np.float32)
@@ -667,8 +758,10 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
         )
         x_rejected = int(np.sum(np.isfinite(xs_for_iqr) & ~np.isfinite(xs_for_target)))
         if x_rejected > 0:
-            log(f"IQR X: descartados {x_rejected} anclas atípicas "
-                f"(fuera de [{lox:.0f}, {hix:.0f}] px)")
+            log(
+                f"IQR X: descartados {x_rejected} anclas atípicas "
+                f"(fuera de [{lox:.0f}, {hix:.0f}] px)"
+            )
         target_x = float(np.nanmedian(xs_for_target))
         target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
@@ -682,10 +775,13 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
     if manual_anchor is None:
         xs[(np.isfinite(xs)) & ((xs < lox) | (xs > hix))] = np.nan
     idx = np.arange(len(xs))
-    good_x = np.isfinite(xs); good_y = np.isfinite(ys)
-    if np.any(good_x): xs[~good_x] = np.interp(idx[~good_x], idx[good_x], xs[good_x])
-    if np.any(good_y): ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
-    per_frame = list(zip(xs.tolist(), ys.tolist()))
+    good_x = np.isfinite(xs)
+    good_y = np.isfinite(ys)
+    if np.any(good_x):
+        xs[~good_x] = np.interp(idx[~good_x], idx[good_x], xs[good_x])
+    if np.any(good_y):
+        ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
+    per_frame = list(zip(xs.tolist(), ys.tolist(), strict=True))
 
     log("Segunda pasada: estabilizando y guardando...")
 
@@ -720,7 +816,9 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
                 cv2.imwrite(out_path, stabilized)
             else:
                 out_path = os.path.join(output_dir, basename)
-                cv2.imwrite(out_path, stabilized, [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)])
+                cv2.imwrite(
+                    out_path, stabilized, [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
+                )
         if progress_cb:
             progress_cb((total + i) / (total * 2))
 
@@ -731,12 +829,16 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
         "target_y": round(target_y, 3),
         "output_width": out_w,
         "output_height": out_h,
-        "output_format": "png (lossless)" if jpeg_quality == 0 else f"jpeg q{jpeg_quality}",
+        "output_format": "png (lossless)"
+        if jpeg_quality == 0
+        else f"jpeg q{jpeg_quality}",
         "film_format": film_format,
         "border_mode": border_mode,
     }
 
-    with open(os.path.join(output_dir, "stabilization_report.txt"), "w", encoding="utf-8") as f:
+    with open(
+        os.path.join(output_dir, "stabilization_report.txt"), "w", encoding="utf-8"
+    ) as f:
         f.write("PERFORATION STABILIZATION REPORT\n")
         f.write("================================\n")
         for k, v in summary.items():

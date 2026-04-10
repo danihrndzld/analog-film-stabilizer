@@ -10,8 +10,29 @@ permissions:
   contents: write
 
 jobs:
+  # ── Lint Python code ──────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: uv sync --group dev
+
+      - name: Ruff lint check
+        run: uv run ruff check src/
+
+      - name: Ruff format check
+        run: uv run ruff format --check src/
+
   # ── Build bundled Python binaries (arm64 + x64) on one runner ─────────────
   python-binary:
+    needs: [lint]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,14 +102,46 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/v}"
           npm version "$TAG" --no-git-tag-version || true
 
+      # ── Code Signing (when secrets are configured) ──────────────────────────
+      - name: Import Developer ID certificate into keychain
+        if: env.CSC_CONTENT != ''
+        env:
+          CSC_CONTENT: ${{ secrets.CSC_CONTENT }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          echo "$CSC_CONTENT" | base64 --decode > /tmp/certificate.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/certificate.p12 \
+            -k build.keychain \
+            -P "$CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "" build.keychain
+          rm /tmp/certificate.p12
+
       - name: Build DMGs (arm64 + x64)
         working-directory: electron
+        env:
+          # Signing env vars - notarize.js and electron-builder use these
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run build
 
-      - name: Ad-hoc codesign app bundles
+      # ── Fallback ad-hoc codesign (when secrets not configured) ──────────────
+      - name: Ad-hoc codesign app bundles (fallback)
+        if: env.CSC_CONTENT == ''
+        env:
+          CSC_CONTENT: ${{ secrets.CSC_CONTENT }}
         run: |
-          codesign --force --deep --sign - "dist/mac-arm64/Perforation Stabilizer.app"
-          codesign --force --deep --sign - "dist/mac/Perforation Stabilizer.app"
+          echo "::warning::No signing certificate configured. Using ad-hoc signing (users will need xattr -cr)."
+          codesign --force --deep --sign - "dist/mac-arm64/Perforation Stabilizer.app" || true
+          codesign --force --deep --sign - "dist/mac/Perforation Stabilizer.app" || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
