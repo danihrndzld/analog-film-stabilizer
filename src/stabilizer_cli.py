@@ -28,6 +28,7 @@ Output lines (one per line, each valid JSON):
 import sys
 import json
 import argparse
+import math
 import os
 
 import cv2
@@ -72,8 +73,8 @@ def run_preview(args):
     emit({
         "type":        "preview",
         "detected":    anchor is not None,
-        "cx":          anchor[0] if anchor is not None else None,
-        "cy":          anchor[1] if anchor is not None else None,
+        "cx":          float(anchor[0]) if anchor is not None and math.isfinite(anchor[0]) else None,
+        "cy":          float(anchor[1]) if anchor is not None and math.isfinite(anchor[1]) else None,
         "previewPath": args.preview_out,
     })
 

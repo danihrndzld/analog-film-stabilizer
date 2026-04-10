@@ -234,7 +234,7 @@ def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=''):
                     cv2.FONT_HERSHEY_SIMPLEX, max(0.4, h / 2500.0),
                     (0, 255, 255), thickness, cv2.LINE_AA)
 
-    if anchor is not None:
+    if anchor is not None and np.isfinite(anchor[0]) and np.isfinite(anchor[1]):
         cx, cy = int(round(anchor[0])), int(round(anchor[1]))
         color_found = (0, 220, 0)  # green
 
@@ -374,12 +374,12 @@ def _detect_by_edge_projection(roi_bgr, frame_h, film_format, roi_w,
             cy = (r_top + r_bot) / 2.0
             if film_format in ('8mm', 'super16') and cy >= frame_h * 0.30:
                 continue
-            return (float(roi_w / 2.0), float(cy))
+            return (float('nan'), float(cy))
 
     # 7. Super 8 fallback: single centred perf — use topmost peak directly.
     #    Zone guard does not apply for super8.
     if film_format == 'super8':
-        return (float(roi_w / 2.0), float(peaks[0]))
+        return (float('nan'), float(peaks[0]))
 
     return None
 
@@ -652,13 +652,35 @@ def stabilize_folder(input_dir, output_dir, progress_cb=None, log_cb=None,
                 f"(fuera de [{lo:.0f}, {hi:.0f}] px)")
         if inliers:
             valid = inliers
-        target_x = float(np.median([p[0] for p in valid]))
+        xs_for_iqr = np.array([p[0] for p in valid], dtype=np.float32)
+        finite_cx = xs_for_iqr[np.isfinite(xs_for_iqr)]
+        if len(finite_cx) == 0:
+            raise RuntimeError("No se encontraron frames con detección de cx válida.")
+        q1x = float(np.percentile(finite_cx, 25))
+        q3x = float(np.percentile(finite_cx, 75))
+        iqrx = q3x - q1x
+        lox, hix = q1x - 1.5 * iqrx, q3x + 1.5 * iqrx
+        xs_for_target = np.where(
+            np.isfinite(xs_for_iqr) & ((xs_for_iqr < lox) | (xs_for_iqr > hix)),
+            np.nan,
+            xs_for_iqr,
+        )
+        x_rejected = int(np.sum(np.isfinite(xs_for_iqr) & ~np.isfinite(xs_for_target)))
+        if x_rejected > 0:
+            log(f"IQR X: descartados {x_rejected} anclas atípicas "
+                f"(fuera de [{lox:.0f}, {hix:.0f}] px)")
+        target_x = float(np.nanmedian(xs_for_target))
         target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
 
     # Fill None positions (failed detections) by linear interpolation.
     xs = np.array([p[0] if p is not None else np.nan for p in points], dtype=np.float32)
     ys = np.array([p[1] if p is not None else np.nan for p in points], dtype=np.float32)
+    # X IQR: null cx values outside the inlier band before interpolation fills them.
+    # Use direct threshold on xs (length N); do NOT use a mask from xs_for_iqr
+    # (length M = len(valid)) — arrays are not index-aligned.
+    if manual_anchor is None:
+        xs[(np.isfinite(xs)) & ((xs < lox) | (xs > hix))] = np.nan
     idx = np.arange(len(xs))
     good_x = np.isfinite(xs); good_y = np.isfinite(ys)
     if np.any(good_x): xs[~good_x] = np.interp(idx[~good_x], idx[good_x], xs[good_x])
