@@ -119,6 +119,16 @@ def _best_contour(thresh, roi_w, top_n=1, aspect_min=0.40, fill_min=0.75,
                 rejections.append((x, y, bw, bh, "fill"))
             continue
 
+        # Axis-alignment filter: perforations are punched perpendicular to the
+        # film strip, so the minAreaRect angle should be within ±8° of 0° or
+        # 90°.  Diagonal scratch artefacts that pass area/solidity/fill checks
+        # are typically rotated ~45° and are eliminated here.
+        rect_angle = cv2.minAreaRect(cnt)[2]  # degrees in [-90, 0)
+        if abs(rect_angle) > 8 and abs(rect_angle + 90) > 8:
+            if collect_rejections:
+                rejections.append((x, y, bw, bh, "angle"))
+            continue
+
         score = area + (fill_ratio * 1000.0)
         candidates.append((score, (float(cx), float(cy))))
 
@@ -258,9 +268,138 @@ def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=''):
     return img
 
 
+def _detect_by_edge_projection(roi_bgr, frame_h, film_format, roi_w,
+                                edge_gauss_sigma=15.0,
+                                edge_peak_thresh_hi=0.60,
+                                edge_peak_thresh_lo=0.15):
+    """Detect a perforation using horizontal Sobel gradient projection.
+
+    Applies Sobel-Y to the ROI to detect horizontal brightness transitions,
+    collapses the gradient to a 1-D row-mean profile, Gaussian-smooths it,
+    then finds a pair of local maxima whose spacing matches the expected
+    perforation height.  The midpoint of that pair is the centroid.
+
+    This method detects the perf boundary from gradient *transitions* rather
+    than requiring a closed, well-thresholded blob.  An 8mm Regular
+    perforation produces two gradient peaks: one at its top edge and one at
+    its bottom edge (~22-24 % of frame height apart at Diego's scanner
+    resolution).  Overexposed frames where Otsu finds no bimodal boundary
+    still retain these gradient steps, which is why this method recovers
+    failures that the contour path cannot.
+
+    Parameters
+    ----------
+    roi_bgr : np.ndarray
+        BGR ROI crop (left strip of the source frame, full frame height).
+    frame_h : int
+        Full frame height in pixels; used for the zone guard.
+    film_format : str
+        Film format string ('super8', '8mm', 'super16').  The vertical zone
+        guard (cy < 30 % of frame height) is applied only for '8mm' and
+        'super16'.
+    roi_w : int
+        Width of the ROI strip; used to derive cx = roi_w / 2.
+    edge_gauss_sigma : float
+        Gaussian smoothing σ (in rows) applied to the row-mean profile.
+        Default 15.0 smooths over ~45 rows at 3σ, suppressing grain noise
+        while preserving the broad perf-boundary peaks.
+    edge_peak_thresh_hi : float
+        Minimum peak height as a fraction of profile.max() for a local
+        maximum to be considered a candidate perf boundary.  Default 0.60.
+    edge_peak_thresh_lo : float
+        Minimum perf height as a fraction of ROI height.  Peak pairs closer
+        together than this fraction are rejected as spurious (dust, grain
+        blobs, narrow scratches).  Default 0.15 (≈456 px at 3040 px frame
+        height), safely above the ~4 % spurious pairs and well below the
+        ~22 % true perf span.
+
+    Returns
+    -------
+    (float, float) or None
+        (cx, cy) of the detected perforation centroid, or None if not found.
+    """
+    # 1. Grayscale + Sobel-Y (horizontal edge detection)
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    sobel = cv2.Sobel(gray, cv2.CV_64F, dx=0, dy=1, ksize=3)
+    profile = np.mean(np.abs(sobel), axis=1)  # shape: (roi_h,)
+
+    roi_h = roi_bgr.shape[0]
+
+    # 2. Guard: all-dark / all-uniform ROI → no useful gradient
+    if profile.max() < 1.0:
+        return None
+
+    # 3. Gaussian smooth via np.convolve (no scipy dependency).
+    #    Build a kernel covering ±3σ; ensure odd length.
+    sigma = edge_gauss_sigma
+    half_w = max(1, int(3 * sigma))
+    x = np.arange(-half_w, half_w + 1, dtype=np.float64)
+    gauss_kernel = np.exp(-0.5 * (x / sigma) ** 2)
+    gauss_kernel /= gauss_kernel.sum()
+    profile_smooth = np.convolve(
+        np.pad(profile, (half_w, half_w), mode='edge'),
+        gauss_kernel,
+        mode='valid',
+    )
+
+    # 4. Guard: all-uniform after smoothing
+    p_max = profile_smooth.max()
+    if p_max < 1.0:
+        return None
+
+    # 5. Find local maxima that exceed edge_peak_thresh_hi × p_max.
+    #    A row qualifies as a local maximum when it is the highest point
+    #    within ±min_sep rows (at least 3 % of ROI height, minimum 10 rows).
+    threshold = edge_peak_thresh_hi * p_max
+    min_sep = max(10, int(roi_h * 0.03))
+    peaks = []
+    for r in range(min_sep, roi_h - min_sep):
+        lo, hi = r - min_sep, r + min_sep
+        if profile_smooth[r] >= profile_smooth[lo:hi + 1].max() and profile_smooth[r] >= threshold:
+            peaks.append(r)
+
+    if not peaks:
+        return None
+
+    # 6. For multi-perf formats: find the topmost pair (r_top, r_bot) where
+    #    the pair spans ≥ edge_peak_thresh_lo of ROI height (rejects spurious
+    #    narrow pairs) and ≤ 35 % (rejects full-frame false pairs), and whose
+    #    midpoint cy falls within the top-perf zone (< 30 % of frame height).
+    #    Take the first valid pair found (topmost).
+    for i, r_top in enumerate(peaks):
+        for r_bot in peaks[i + 1:]:
+            perf_h = r_bot - r_top
+            if perf_h < edge_peak_thresh_lo * roi_h or perf_h > 0.35 * roi_h:
+                continue
+            cy = (r_top + r_bot) / 2.0
+            if film_format in ('8mm', 'super16') and cy >= frame_h * 0.30:
+                continue
+            return (float(roi_w / 2.0), float(cy))
+
+    # 7. Super 8 fallback: single centred perf — use topmost peak directly.
+    #    Zone guard does not apply for super8.
+    if film_format == 'super8':
+        return (float(roi_w / 2.0), float(peaks[0]))
+
+    return None
+
+
 def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8',
-                       debug_dir=None, frame_name=''):
+                       debug_dir=None, frame_name='',
+                       edge_gauss_sigma=15.0,
+                       edge_peak_thresh_hi=0.60,
+                       edge_peak_thresh_lo=0.15):
     """Detect the perforation anchor point in a frame.
+
+    Detection uses a two-stage cascade:
+
+      1. Edge projection (primary) — Sobel-Y gradient projected to a 1-D
+         row-mean profile.  Exposure-robust: detects the brightness transition
+         at the perf boundary even on overexposed frames where binary
+         thresholding fails.  Runs on all formats before the contour branch.
+
+      2. Contour detection (fallback) — CLAHE + Otsu + adaptive threshold +
+         contour filtering.  Runs only when edge projection returns None.
 
     film_format values:
       'super8'  — 1 perf, left ROI (default)
@@ -277,22 +416,58 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
     When debug_dir and frame_name are provided, a failed detection (return None)
     causes an annotated ROI-crop JPEG to be written to debug_dir showing all
     rejected contours and their disqualifying reasons.
+
+    Edge projection tuning parameters (code-level only, not exposed in UI/CLI):
+      edge_gauss_sigma      — Gaussian smoothing σ for the row-mean profile.
+      edge_peak_thresh_hi   — Top-edge threshold as fraction of profile max.
+      edge_peak_thresh_lo   — Bottom-edge threshold as fraction of profile max.
     """
     h, w = frame.shape[:2]
     roi_w = max(50, int(w * roi_ratio))
     kernel = np.ones((3, 3), np.uint8)
 
     def thresh_band(band_bgr):
-        """Otsu-threshold a band; fall back to adaptive if Otsu saturates it.
+        """Threshold a band with a three-tier fallback strategy.
 
-        Triggers adaptive fallback when Otsu produces an all-black result
-        (countNonZero == 0) OR an all-white / near-saturated result
-        (countNonZero > 95 % of pixels) — both indicate Otsu failed to find
-        a meaningful threshold.
+        Tier 1 — White-reference adaptive threshold:
+          Sample the right 15 % of the ROI (film base, never the perf) to
+          measure the actual film-base brightness, then threshold at 85 % of
+          that value.  This normalises for per-frame exposure drift and is
+          the primary fix for overexposed 8mm Regular frames where Otsu finds
+          no bimodal boundary.
+
+        Tier 2 — Otsu:
+          Used when the film base is too dark for the reference strip to give
+          a reliable reading, or when Tier 1 produces a saturated result.
+
+        Tier 3 — Adaptive threshold:
+          Fallback when Otsu produces an all-black OR near-saturated result.
         """
-        gray = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2GRAY)
+        gray_raw = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2GRAY)
+        bh_b, bw_b = band_bgr.shape[:2]
+
+        # ── Tier 1: white-reference threshold ─────────────────────────────
+        ref_x = int(bw_b * 0.85)
+        if ref_x < bw_b:
+            ref_mean = float(np.mean(gray_raw[:, ref_x:]))
+            # Only use white-reference threshold when the film base is genuinely
+            # bright (overexposed).  At ref_mean ≤ 190 the film is normally or
+            # under-exposed; Otsu handles it well and a low reference threshold
+            # (ref_mean × 0.85 ≈ 85–160) would be too permissive, flooding the
+            # binary and masking the perforation.
+            if ref_mean > 190:
+                blur_raw = cv2.GaussianBlur(gray_raw, (5, 5), 0)
+                _, t_ref = cv2.threshold(
+                    blur_raw, ref_mean * 0.85, 255, cv2.THRESH_BINARY)
+                t_ref = cv2.morphologyEx(t_ref, cv2.MORPH_OPEN, kernel)
+                t_ref = cv2.morphologyEx(t_ref, cv2.MORPH_CLOSE, kernel)
+                nz_ref = cv2.countNonZero(t_ref)
+                if 0 < nz_ref < int(0.95 * t_ref.size):
+                    return t_ref
+
+        # ── Tier 2: CLAHE + Otsu ──────────────────────────────────────────
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
+        gray = clahe.apply(gray_raw)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         _, t = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         t = cv2.morphologyEx(t, cv2.MORPH_OPEN, kernel)
@@ -300,9 +475,9 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
         nz = cv2.countNonZero(t)
         if 0 < nz < int(0.95 * t.size):
             return t
-        # Fallback: adaptive threshold for all-black OR near-all-white Otsu output
-        bh, bw = band_bgr.shape[:2]
-        block = max(51, (min(bh, roi_w) // 20) | 1)
+
+        # ── Tier 3: adaptive threshold ────────────────────────────────────
+        block = max(51, (min(bh_b, roi_w) // 20) | 1)
         a = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY, block, -5)
         a = cv2.morphologyEx(a, cv2.MORPH_OPEN, kernel)
@@ -310,6 +485,22 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
         return a
 
     roi = frame[:, :roi_w]
+
+    # ── Primary: edge projection ───────────────────────────────────────────────
+    # Runs on every frame and every format before the contour branch.  Returns
+    # immediately on success so the contour pass is skipped entirely (~84 % of
+    # frames) — collect_rejections is never set on those frames, saving compute.
+    ep_result = _detect_by_edge_projection(
+        roi, h, film_format, roi_w,
+        edge_gauss_sigma=edge_gauss_sigma,
+        edge_peak_thresh_hi=edge_peak_thresh_hi,
+        edge_peak_thresh_lo=edge_peak_thresh_lo,
+    )
+    if ep_result is not None:
+        return ep_result
+
+    # ── Fallback: contour detection ────────────────────────────────────────────
+    # Only reached when edge projection returned None.
 
     if film_format in ('8mm', 'super16'):
         # Single-pass full-ROI scan — no h//2 split.
@@ -337,25 +528,28 @@ def detect_perforation(frame, roi_ratio=0.22, threshold=210, film_format='super8
             rejections = []
 
         if len(candidates) >= 1:
-            # Always anchor to the topmost qualifying perforation (smallest cy).
-            # Scanning top_n=2 maximises recall; we pick the topmost so the
-            # reference stays consistent across frames regardless of how many
-            # perfs are visible.
-            pt_top = min(candidates, key=lambda p: p[1])
+            # Per-hole quality validation: for 8mm/super16 the top perforation
+            # sits at the frame boundary — its centroid should appear in the
+            # upper 30 % of the frame height.  Candidates below that threshold
+            # are almost certainly the bottom perf, a frame-separator artefact,
+            # or bright film content leaking into the ROI.
+            #
+            # Keeping only top-zone candidates (cy < 30 % of frame height):
+            #   • Eliminates the false-positive zone between the two perfs.
+            #   • Recovers frames where one valid top-perf contour was found
+            #     alongside a spurious bottom candidate — previously the
+            #     midpoint would be corrupted; now we use the top perf alone.
+            #   • Replaces the old "reject if single candidate is in bottom
+            #     half" rule with a tighter, format-aware band.
+            top_zone = [p for p in candidates if p[1] < h * 0.30]
+            if top_zone:
+                pt_top = min(top_zone, key=lambda p: p[1])
+                return (float(pt_top[0]), float(pt_top[1]))
 
-            # Position guard: for 8mm/super16 with 2 perfs, the top perf sits
-            # in the upper half of the frame.  If a single candidate lands in
-            # the bottom half it is almost certainly the bottom perforation
-            # (the top one was occluded/underexposed).  Using it as the anchor
-            # would introduce a jump of ~half the inter-perf distance.  Treat
-            # such frames as failed detections so the interpolation pass handles
-            # them instead.
-            if len(candidates) == 1 and pt_top[1] > h * 0.5:
-                if debug_dir and frame_name:
-                    _save_debug_frame(roi, rejections, frame_name, debug_dir)
-                return None
-
-            return (float(pt_top[0]), float(pt_top[1]))
+            # No candidate landed in the top-perf zone → failed detection.
+            if debug_dir and frame_name:
+                _save_debug_frame(roi, rejections, frame_name, debug_dir)
+            return None
 
         # No qualifying contour found.
         if debug_dir and frame_name:
