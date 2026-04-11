@@ -4,10 +4,9 @@ These tests use synthetic frames built with NumPy/OpenCV — no sample images
 needed.  Frame dimensions are chosen so that perforation blobs satisfy all
 default filter thresholds (area ≥ 5000, aspect 0.40-1.20, fill ≥ 0.75).
 
-Anchor point convention: the detection algorithm returns the BOTTOM-RIGHT
-corner of the perforation bounding rect (x+bw, y+bh), which is the inner
-corner closest to the exposed image area. This provides more stable
-anchoring than centroid because perforation size can vary along the film.
+Anchor point convention: the detection algorithm returns the contour
+centroid (center of mass), which averages over the entire contour area
+and is far less sensitive to boundary noise than a corner point.
 """
 import os
 import sys
@@ -77,17 +76,17 @@ def make_binary_roi(h=300, w=500):
 class TestBestContour:
 
     def test_happy_path_solid_rect(self):
-        """Solid rect satisfying all default filters → bottom-right corner returned."""
+        """Solid rect satisfying all default filters → centroid returned."""
         img = make_binary_roi(h=300, w=500)
         # 100×100 at (50, 50) to (150, 150): area=10000, aspect=1.0, fill=1.0
-        # Bottom-right corner is (150, 150), left edge x=50 < 350 (70% of 500)
+        # Centroid is (100, 100), cx=100 < 350 (70% of 500)
         cv2.rectangle(img, (50, 50), (150, 150), 255, -1)
         result = _best_contour(img, roi_w=500)
         assert result is not None
         cx, cy = result
-        # Anchor is bottom-right corner (x+bw, y+bh) = (150, 150)
-        assert abs(cx - 150) < 3
-        assert abs(cy - 150) < 3
+        # Anchor is centroid ≈ (100, 100)
+        assert abs(cx - 100) < 3
+        assert abs(cy - 100) < 3
 
     def test_aspect_min_boundary_rejected_at_040_accepted_at_025(self):
         """Contour with aspect≈0.30 is rejected at default aspect_min=0.40
@@ -117,23 +116,21 @@ class TestBestContour:
                                solidity_min=0.0)
         assert result is not None
 
-    def test_x_position_filter_uses_left_edge(self):
-        """Contour whose left edge exceeds 70% roi_w is rejected."""
+    def test_centroid_x_filter_rejects_far_right(self):
+        """Contour whose centroid exceeds 70% roi_w is rejected."""
         roi_w = 500  # 70 % threshold = 350
         img = make_binary_roi(h=500, w=roi_w)
-        # x=360 (72 %), bw=100, bh=100 → left edge past threshold
-        cv2.rectangle(img, (360, 150), (460, 250), 255, -1)
-        # area=100*100=10000, aspect=1.0, fill=1.0 — x-position filter rejects.
+        # x=310, bw=100 → centroid cx=360 (72 % of 500) — rejected
+        cv2.rectangle(img, (310, 150), (410, 250), 255, -1)
         result = _best_contour(img, roi_w=roi_w)
         assert result is None
 
-    def test_x_position_filter_accepts_contour_near_threshold(self):
-        """Contour whose left edge is at 68% roi_w (under 70%) is accepted."""
+    def test_centroid_x_filter_accepts_near_threshold(self):
+        """Contour whose centroid is at 66% roi_w (under 70%) is accepted."""
         roi_w = 500  # 70 % threshold = 350
         img = make_binary_roi(h=500, w=roi_w)
-        # x=340 (68 %), bw=100, bh=100 → left edge under threshold
-        cv2.rectangle(img, (340, 150), (440, 250), 255, -1)
-        # area=100*100=10000, aspect=1.0, fill=1.0 — accepted
+        # x=280, bw=100 → centroid cx=330 (66 % of 500) — accepted
+        cv2.rectangle(img, (280, 150), (380, 250), 255, -1)
         result = _best_contour(img, roi_w=roi_w)
         assert result is not None
 
@@ -222,13 +219,12 @@ class TestAnnotateRoiPreview:
 class TestDetectPerforation:
 
     def test_8mm_two_perfs_returns_topmost_not_midpoint(self):
-        """Two well-separated perforations → anchor is the TOPMOST perf's bottom-right corner."""
+        """Two well-separated perforations → anchor is the TOPMOST perf's centroid."""
         frame = make_frame([0.25, 0.75])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
         # Topmost perf centroid y ≈ 0.25 × FRAME_H = 250
-        # Bottom edge = centroid_y + PERF_H/2 = 250 + 50 = 300 (0.30 of FRAME_H)
-        assert abs(pt[1] - FRAME_H * 0.30) < FRAME_H * 0.08
+        assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
         # Explicitly verify it's NOT the midpoint
         assert abs(pt[1] - FRAME_H * 0.50) > FRAME_H * 0.10
 
@@ -244,22 +240,21 @@ class TestDetectPerforation:
         assert abs(pt_two[1] - pt_one[1]) < 20
 
     def test_8mm_perf_at_boundary_of_zone_detected(self):
-        """Perf whose bottom edge is just under 35% zone threshold is detected."""
-        # Bottom edge at 34% of frame height (340px) → cy < 350 threshold
-        # Perf centroid at 29% (290px), bottom edge at 290 + 50 = 340
-        frame = make_frame([0.29])
+        """Perf whose centroid is just under 30% zone threshold is detected."""
+        # Centroid at 28% of frame height (280px) → cy < 300 threshold
+        frame = make_frame([0.28])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
-        # Anchor should be near bottom edge (340)
-        assert abs(pt[1] - FRAME_H * 0.34) < FRAME_H * 0.05
+        # Centroid should be near 280
+        assert abs(pt[1] - FRAME_H * 0.28) < FRAME_H * 0.05
 
-    def test_8mm_single_perf_fallback_returns_corner(self):
-        """Only one perf visible → its bottom-right corner is returned, not None."""
+    def test_8mm_single_perf_fallback_returns_centroid(self):
+        """Only one perf visible → its centroid is returned, not None."""
         frame = make_frame([0.25])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
-        # Bottom edge of perf at 0.25 = 250 + 50 = 300
-        assert abs(pt[1] - FRAME_H * 0.30) < FRAME_H * 0.08
+        # Centroid at 0.25 × FRAME_H = 250
+        assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
 
     def test_8mm_no_perfs_returns_none(self):
         """All-black frame → None for 8mm format."""
@@ -273,12 +268,12 @@ class TestDetectPerforation:
         assert pt is not None
 
     def test_super16_two_perfs_detected(self):
-        """super16 uses the same 2-perf path as 8mm and returns bottom-right corner."""
+        """super16 uses the same 2-perf path as 8mm and returns centroid."""
         frame = make_frame([0.25, 0.75])
         pt = detect_perforation(frame, film_format="super16")
         assert pt is not None
-        # Bottom edge of top perf at 0.25 = 250 + 50 = 300
-        assert abs(pt[1] - FRAME_H * 0.30) < FRAME_H * 0.08
+        # Centroid of top perf at 0.25 × FRAME_H = 250
+        assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
 
 
 # ── Unit 3: debug frame generation ───────────────────────────────────────────

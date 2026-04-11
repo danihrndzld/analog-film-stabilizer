@@ -54,10 +54,10 @@ def _best_contour(
 ):
     """Return top_n perforation candidates from a binary image as (cx, cy) tuples.
 
-    The anchor point is the bottom-right corner of the perforation bounding rect,
-    which is the inner corner closest to the exposed image area. This provides
-    more stable anchoring than centroid because perforation size can vary slightly
-    along the film roll, but the corner position remains consistent.
+    The anchor point is the contour centroid (center of mass), which averages
+    over the entire contour area.  This is far less sensitive to boundary noise
+    than a corner point — a 1px boundary shift moves the centroid by ~1/N pixels
+    (where N is the number of contour pixels).
 
     Parameters
     ----------
@@ -108,17 +108,15 @@ def _best_contour(
                 rejections.append((x, y, bw, bh, "solidity"))
             continue
 
-        # Use bottom-right corner of bounding rect as anchor point.
-        # This is the inner corner closest to the exposed image area,
-        # providing stable anchoring even if perforation size varies.
-        cx = float(x + bw)
-        cy = float(y + bh)
+        # Compute centroid (center of mass) from contour moments.
+        M = cv2.moments(cnt)
+        cx = M["m10"] / M["m00"] if M["m00"] != 0 else float(x + bw / 2)
+        cy = M["m01"] / M["m00"] if M["m00"] != 0 else float(y + bh / 2)
 
         # X-position filter: reject perforations too far right in the ROI.
-        # Use left edge (x) for the filter since cx is now at right edge.
-        if x > roi_w * 0.70:
+        if cx > roi_w * 0.70:
             if collect_rejections:
-                rejections.append((x, y, bw, bh, "x-position"))
+                rejections.append((x, y, bw, bh, "centroid-x"))
             continue
 
         aspect = bw / float(bh + 1e-6)
@@ -356,8 +354,7 @@ def _detect_by_edge_projection(
     Applies Sobel-Y to the ROI to detect horizontal brightness transitions,
     collapses the gradient to a 1-D row-mean profile, Gaussian-smooths it,
     then finds a pair of local maxima whose spacing matches the expected
-    perforation height.  Returns the bottom edge (r_bot) as the anchor cy,
-    consistent with the corner-based anchoring used by contour detection.
+    perforation height.  The midpoint of that pair is the centroid.
 
     This method detects the perf boundary from gradient *transitions* rather
     than requiring a closed, well-thresholded blob.  An 8mm Regular
@@ -396,8 +393,8 @@ def _detect_by_edge_projection(
     Returns
     -------
     (float, float) or None
-        (cx, cy) of the detected perforation anchor, or None if not found.
-        cx is nan (interpolated from neighbors); cy is the bottom edge of the perf.
+        (cx, cy) of the detected perforation centroid, or None if not found.
+        cx is nan (interpolated from neighbors); cy is the midpoint of the perf.
     """
     # 1. Grayscale + Sobel-Y (horizontal edge detection)
     gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
@@ -448,19 +445,17 @@ def _detect_by_edge_projection(
     # 6. For multi-perf formats: find the topmost pair (r_top, r_bot) where
     #    the pair spans ≥ edge_peak_thresh_lo of ROI height (rejects spurious
     #    narrow pairs) and ≤ 35 % (rejects full-frame false pairs), and whose
-    #    bottom edge (r_bot) falls within the top-perf zone (< 35 % of frame
-    #    height, slightly relaxed from the old midpoint check at 30 %).
+    #    midpoint cy falls within the top-perf zone (< 30 % of frame height).
     #    Take the first valid pair found (topmost).
     for i, r_top in enumerate(peaks):
         for r_bot in peaks[i + 1 :]:
             perf_h = r_bot - r_top
             if perf_h < edge_peak_thresh_lo * roi_h or perf_h > 0.35 * roi_h:
                 continue
-            # Use bottom edge as anchor cy for consistency with corner anchoring
-            cy = float(r_bot)
-            if film_format in ("8mm", "super16") and cy >= frame_h * 0.35:
+            cy = (r_top + r_bot) / 2.0
+            if film_format in ("8mm", "super16") and cy >= frame_h * 0.30:
                 continue
-            return (float("nan"), cy)
+            return (float("nan"), float(cy))
 
     # 7. Super 8 fallback: single centred perf — use topmost peak directly.
     #    Zone guard does not apply for super8.
@@ -618,18 +613,14 @@ def detect_perforation(
             # frame-separator artefact, or bright film content leaking into
             # the ROI.
             #
-            # The 35 % threshold (vs. old 30 %) accommodates corner-based
-            # anchoring: the bottom edge of a perf centred at 25 % of frame
-            # height lands around 30 %, so 35 % provides margin for variation.
-            #
-            # Keeping only top-zone candidates:
+            # Keeping only top-zone candidates (centroid cy < 30 % of frame):
             #   • Eliminates the false-positive zone between the two perfs.
             #   • Recovers frames where one valid top-perf contour was found
             #     alongside a spurious bottom candidate — previously the
             #     midpoint would be corrupted; now we use the top perf alone.
             #   • Replaces the old "reject if single candidate is in bottom
             #     half" rule with a tighter, format-aware band.
-            top_zone = [p for p in candidates if p[1] < h * 0.35]
+            top_zone = [p for p in candidates if p[1] < h * 0.30]
             if top_zone:
                 pt_top = min(top_zone, key=lambda p: p[1])
                 return (float(pt_top[0]), float(pt_top[1]))
