@@ -833,6 +833,66 @@ def _template_match_perforation(frame, template, roi_ratio=0.22, min_confidence=
     return (cx, cy, max_val)
 
 
+def _estimate_rotation(frame, template, cx, cy, roi_ratio=0.22):
+    """Estimate small rotation angle of the perforation region using ECC.
+
+    Uses cv2.findTransformECC with MOTION_EUCLIDEAN (translation + rotation)
+    on a tight crop around the template-matched position.  Returns the rotation
+    angle in degrees, or 0.0 if ECC fails to converge.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Full BGR frame.
+    template : np.ndarray
+        Grayscale perforation template patch.
+    cx, cy : float
+        Template-matched center position in ROI coordinates.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+
+    Returns
+    -------
+    float
+        Rotation angle in degrees (positive = counter-clockwise).
+    """
+    h, w = frame.shape[:2]
+    roi_w = max(50, int(w * roi_ratio))
+    roi_bgr = frame[:, :roi_w]
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    th, tw = template.shape[:2]
+    # Extract the matched region from the current frame
+    x0 = max(0, int(cx - tw / 2))
+    y0 = max(0, int(cy - th / 2))
+    x1 = min(roi_w, x0 + tw)
+    y1 = min(h, y0 + th)
+
+    if x1 - x0 != tw or y1 - y0 != th:
+        return 0.0
+
+    patch = gray[y0:y1, x0:x1]
+
+    # ECC with EUCLIDEAN model (translation + rotation)
+    warp_matrix = np.eye(2, 3, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-4)
+
+    try:
+        _, warp_matrix = cv2.findTransformECC(
+            template.astype(np.float32),
+            patch.astype(np.float32),
+            warp_matrix,
+            cv2.MOTION_EUCLIDEAN,
+            criteria,
+        )
+        # Extract rotation angle from the 2×3 matrix
+        # For EUCLIDEAN: [[cos θ, -sin θ, tx], [sin θ, cos θ, ty]]
+        angle_rad = np.arctan2(warp_matrix[1, 0], warp_matrix[0, 0])
+        return float(np.degrees(angle_rad))
+    except cv2.error:
+        return 0.0
+
+
 def stabilize_folder(
     input_dir,
     output_dir,
@@ -856,6 +916,7 @@ def stabilize_folder(
         os.makedirs(debug_dir, exist_ok=True)
 
     points = []
+    angles = []  # per-frame rotation angles (degrees)
     failures = 0
     total = len(files)
 
@@ -913,6 +974,8 @@ def stabilize_folder(
         else:
             pt = None
 
+            angle = 0.0
+
             # Try template matching first (primary)
             if template is not None:
                 tm_result = _template_match_perforation(
@@ -922,6 +985,10 @@ def stabilize_folder(
                     cx, cy, conf = tm_result
                     pt = (cx, cy)
                     tm_count += 1
+                    # Estimate rotation from the matched region
+                    angle = _estimate_rotation(
+                        frame, template, cx, cy, roi_ratio=roi_ratio
+                    )
 
             # Fall back to contour detection
             if pt is None:
@@ -937,6 +1004,7 @@ def stabilize_folder(
                     contour_count += 1
 
             points.append(pt)
+            angles.append(angle)
             if pt is None:
                 failures += 1
                 log(f"Sin detección: {os.path.basename(f)}")
@@ -1030,8 +1098,21 @@ def stabilize_folder(
             pt = per_frame[i - 1]
             dx = target_x - pt[0]
             dy = target_y - pt[1]
+            angle = angles[i - 1] if i - 1 < len(angles) else 0.0
 
-            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            # Build rotation + translation matrix.
+            # Rotate around the detected perforation position to correct
+            # in-gate tilt, then translate to align to the target.
+            if abs(angle) > 0.001:
+                # Rotate around the perforation's position in the frame
+                perf_x, perf_y = pt[0], pt[1]
+                R = cv2.getRotationMatrix2D((perf_x, perf_y), -angle, 1.0)
+                # Add translation to the rotation matrix
+                R[0, 2] += dx
+                R[1, 2] += dy
+                M = R
+            else:
+                M = np.float32([[1, 0, dx], [0, 1, dy]])
             stabilized = cv2.warpAffine(
                 frame,
                 M,
