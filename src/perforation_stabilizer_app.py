@@ -687,6 +687,152 @@ _BORDER_MODES = {
 }
 
 
+# ── Template matching alignment ──────────────────────────────────────────────
+
+
+def _build_perforation_template(frame, anchor, roi_ratio=0.22, padding=20):
+    """Extract a grayscale patch around the detected perforation for template matching.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Full BGR frame.
+    anchor : tuple(float, float)
+        Detected (cx, cy) in full-frame coordinates.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+    padding : int
+        Extra pixels around the perforation bounding region.
+
+    Returns
+    -------
+    (template, origin) : (np.ndarray, (int, int))
+        Grayscale template patch and the (x0, y0) origin of the patch in the ROI.
+        Returns (None, None) if extraction fails.
+    """
+    h, w = frame.shape[:2]
+    roi_w = max(50, int(w * roi_ratio))
+    roi_bgr = frame[:, :roi_w]
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    cx, cy = anchor
+    # Estimate perforation size from ROI dimensions (typically ~8-15% of ROI width)
+    est_perf_w = int(roi_w * 0.35)
+    est_perf_h = int(h * 0.08)
+
+    x0 = max(0, int(cx - est_perf_w // 2 - padding))
+    y0 = max(0, int(cy - est_perf_h // 2 - padding))
+    x1 = min(roi_w, int(cx + est_perf_w // 2 + padding))
+    y1 = min(h, int(cy + est_perf_h // 2 + padding))
+
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return None, None
+
+    template = gray[y0:y1, x0:x1].copy()
+    return template, (x0, y0)
+
+
+def _build_averaged_template(frames_and_anchors, roi_ratio=0.22, padding=20):
+    """Build a noise-reduced template by averaging patches from multiple frames.
+
+    Parameters
+    ----------
+    frames_and_anchors : list of (np.ndarray, (float, float))
+        List of (frame, anchor) tuples from successful detections.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+    padding : int
+        Extra pixels around the perforation.
+
+    Returns
+    -------
+    (template, origin) : (np.ndarray, (int, int)) or (None, None)
+    """
+    patches = []
+    origin = None
+    for frame, anchor in frames_and_anchors:
+        tpl, orig = _build_perforation_template(frame, anchor, roi_ratio, padding)
+        if tpl is not None:
+            if origin is None:
+                origin = orig
+                patches.append(tpl.astype(np.float32))
+            elif tpl.shape == patches[0].shape:
+                patches.append(tpl.astype(np.float32))
+
+    if not patches:
+        return None, None
+
+    averaged = np.mean(patches, axis=0).astype(np.uint8)
+    return averaged, origin
+
+
+def _template_match_perforation(frame, template, roi_ratio=0.22, min_confidence=0.4):
+    """Locate the perforation in a frame using normalized cross-correlation.
+
+    Uses cv2.matchTemplate with TM_CCOEFF_NORMED and parabolic sub-pixel
+    refinement on the correlation peak.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Full BGR frame.
+    template : np.ndarray
+        Grayscale perforation template patch.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+    min_confidence : float
+        Minimum NCC score to accept the match (0.0-1.0).
+
+    Returns
+    -------
+    (cx, cy, confidence) or None
+        Sub-pixel (cx, cy) in ROI coordinates and NCC confidence score,
+        or None if the match is below min_confidence.
+    """
+    h, w = frame.shape[:2]
+    roi_w = max(50, int(w * roi_ratio))
+    roi_bgr = frame[:, :roi_w]
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    th, tw = template.shape[:2]
+    if gray.shape[0] < th or gray.shape[1] < tw:
+        return None
+
+    result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+    if max_val < min_confidence:
+        return None
+
+    mx, my = max_loc  # top-left of best match (integer)
+
+    # Sub-pixel refinement via parabolic interpolation on the correlation surface
+    rh, rw = result.shape
+    sx, sy = float(mx), float(my)
+
+    if 0 < mx < rw - 1:
+        left = float(result[my, mx - 1])
+        center = float(result[my, mx])
+        right = float(result[my, mx + 1])
+        denom = 2.0 * (2.0 * center - left - right)
+        if abs(denom) > 1e-6:
+            sx = mx + (left - right) / denom
+
+    if 0 < my < rh - 1:
+        top = float(result[my - 1, mx])
+        center = float(result[my, mx])
+        bottom = float(result[my + 1, mx])
+        denom = 2.0 * (2.0 * center - top - bottom)
+        if abs(denom) > 1e-6:
+            sy = my + (top - bottom) / denom
+
+    # Convert from match top-left to template center
+    cx = sx + tw / 2.0
+    cy = sy + th / 2.0
+
+    return (cx, cy, max_val)
+
+
 def stabilize_folder(
     input_dir,
     output_dir,
@@ -718,7 +864,45 @@ def stabilize_folder(
             log_cb(msg)
 
     log(f"Encontré {total} imágenes.")
-    log("Primera pasada: detectando perforación...")
+
+    # ── Phase 1: Bootstrap — build reference template from first detections ──
+    log("Fase 1: construyendo plantilla de referencia...")
+    bootstrap_limit = min(30, total)
+    bootstrap_frames = []  # (frame, anchor) pairs for template building
+    template = None
+
+    for i, f in enumerate(files[:bootstrap_limit], 1):
+        frame = cv2.imread(f)
+        if frame is None:
+            continue
+        pt = detect_perforation(
+            frame,
+            roi_ratio=roi_ratio,
+            threshold=threshold,
+            film_format=film_format,
+        )
+        if pt is not None:
+            bootstrap_frames.append((frame, pt))
+            if len(bootstrap_frames) >= 15:
+                break
+
+    if bootstrap_frames:
+        template, _tpl_origin = _build_averaged_template(
+            bootstrap_frames, roi_ratio=roi_ratio, padding=25
+        )
+        if template is not None:
+            log(
+                f"Plantilla construida de {len(bootstrap_frames)} frames "
+                f"({template.shape[1]}×{template.shape[0]} px)"
+            )
+
+    if template is None:
+        log("No pude construir plantilla — usando detección por contorno.")
+
+    # ── Phase 2: Detect all frames via template matching (or contour fallback) ──
+    log("Fase 2: alineando frames...")
+    tm_count = 0
+    contour_count = 0
 
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
@@ -727,20 +911,42 @@ def stabilize_folder(
             failures += 1
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
-            pt = detect_perforation(
-                frame,
-                roi_ratio=roi_ratio,
-                threshold=threshold,
-                film_format=film_format,
-                debug_dir=debug_dir,
-                frame_name=os.path.basename(f),
-            )
+            pt = None
+
+            # Try template matching first (primary)
+            if template is not None:
+                tm_result = _template_match_perforation(
+                    frame, template, roi_ratio=roi_ratio, min_confidence=0.4
+                )
+                if tm_result is not None:
+                    cx, cy, conf = tm_result
+                    pt = (cx, cy)
+                    tm_count += 1
+
+            # Fall back to contour detection
+            if pt is None:
+                pt = detect_perforation(
+                    frame,
+                    roi_ratio=roi_ratio,
+                    threshold=threshold,
+                    film_format=film_format,
+                    debug_dir=debug_dir,
+                    frame_name=os.path.basename(f),
+                )
+                if pt is not None:
+                    contour_count += 1
+
             points.append(pt)
             if pt is None:
                 failures += 1
                 log(f"Sin detección: {os.path.basename(f)}")
         if progress_cb:
             progress_cb(i / (total * 2))
+
+    log(
+        f"Detección: {tm_count} template, {contour_count} contorno, "
+        f"{failures} fallidos de {total}"
+    )
 
     valid = [p for p in points if p is not None]
     if not valid:

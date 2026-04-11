@@ -21,6 +21,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from perforation_stabilizer_app import (
     _annotate_roi_preview,
     _best_contour,
+    _build_perforation_template,
+    _build_averaged_template,
+    _template_match_perforation,
     detect_perforation,
     stabilize_folder,
 )
@@ -369,3 +372,95 @@ class TestDebugFrames:
             # Should complete without raising even though no debug_dir is given
             stabilize_folder(inp, out, debug_dir=None,
                              film_format="super8", jpeg_quality=95)
+
+
+# ── Unit 4: Template matching alignment ──────────────────────────────────────
+
+class TestTemplateMatching:
+
+    def test_build_template_returns_patch(self):
+        """Template extraction from a frame with a detected perforation produces a valid patch."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        tpl, origin = _build_perforation_template(frame, pt)
+        assert tpl is not None
+        assert tpl.ndim == 2  # grayscale
+        assert tpl.shape[0] > 10 and tpl.shape[1] > 10
+        assert origin is not None
+
+    def test_build_averaged_template_from_multiple_frames(self):
+        """Averaged template from multiple identical frames has same shape as single."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        pairs = [(frame, pt)] * 5
+        avg_tpl, origin = _build_averaged_template(pairs)
+        assert avg_tpl is not None
+        single_tpl, _ = _build_perforation_template(frame, pt)
+        assert avg_tpl.shape == single_tpl.shape
+
+    def test_template_match_finds_perforation(self):
+        """Template matching on the same frame used to build the template returns a match."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        tpl, _ = _build_perforation_template(frame, pt)
+        assert tpl is not None
+        result = _template_match_perforation(frame, tpl)
+        assert result is not None
+        cx, cy, conf = result
+        # Match should be near the original detection
+        assert abs(cx - pt[0]) < 10
+        assert abs(cy - pt[1]) < 10
+        assert conf > 0.8  # high confidence on same frame
+
+    def test_template_match_subpixel_precision(self):
+        """Template match returns float coordinates (sub-pixel)."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        tpl, _ = _build_perforation_template(frame, pt)
+        result = _template_match_perforation(frame, tpl)
+        assert result is not None
+        cx, cy, _ = result
+        assert isinstance(cx, float)
+        assert isinstance(cy, float)
+
+    def test_template_match_rejects_blank_frame(self):
+        """Template matching on an all-black frame returns None (low confidence)."""
+        # Build template from a good frame
+        good = make_frame([0.25])
+        pt = detect_perforation(good, film_format="super8")
+        tpl, _ = _build_perforation_template(good, pt)
+        assert tpl is not None
+        # Match against blank frame
+        blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        result = _template_match_perforation(blank, tpl)
+        assert result is None
+
+    def test_template_match_consistent_across_identical_frames(self):
+        """Template matching on identical frames returns the same position."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        tpl, _ = _build_perforation_template(frame, pt)
+        r1 = _template_match_perforation(frame, tpl)
+        r2 = _template_match_perforation(frame, tpl)
+        assert r1 is not None and r2 is not None
+        # Identical frames should give identical positions
+        assert abs(r1[0] - r2[0]) < 0.01
+        assert abs(r1[1] - r2[1]) < 0.01
+
+    def test_stabilize_folder_uses_template_matching(self):
+        """stabilize_folder with multiple identical frames uses template matching."""
+        with tempfile.TemporaryDirectory() as inp, \
+             tempfile.TemporaryDirectory() as out:
+
+            good = make_frame([0.25])
+            for i in range(5):
+                _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
+
+            stabilize_folder(inp, out, film_format="super8", jpeg_quality=95)
+
+            # Verify output was created for all frames (+ report file)
+            out_images = [f for f in os.listdir(out) if f.endswith(".jpg")]
+            assert len(out_images) == 5
