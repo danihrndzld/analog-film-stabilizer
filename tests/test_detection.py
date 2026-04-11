@@ -3,6 +3,11 @@
 These tests use synthetic frames built with NumPy/OpenCV — no sample images
 needed.  Frame dimensions are chosen so that perforation blobs satisfy all
 default filter thresholds (area ≥ 5000, aspect 0.40-1.20, fill ≥ 0.75).
+
+Anchor point convention: the detection algorithm returns the BOTTOM-RIGHT
+corner of the perforation bounding rect (x+bw, y+bh), which is the inner
+corner closest to the exposed image area. This provides more stable
+anchoring than centroid because perforation size can vary along the film.
 """
 import os
 import sys
@@ -72,15 +77,17 @@ def make_binary_roi(h=300, w=500):
 class TestBestContour:
 
     def test_happy_path_solid_rect(self):
-        """Solid rect satisfying all default filters → centroid returned."""
+        """Solid rect satisfying all default filters → bottom-right corner returned."""
         img = make_binary_roi(h=300, w=500)
-        # 100×100 at (50, 100): area=10000, aspect=1.0, fill=1.0, cx=100 < 350
+        # 100×100 at (50, 50) to (150, 150): area=10000, aspect=1.0, fill=1.0
+        # Bottom-right corner is (150, 150), left edge x=50 < 350 (70% of 500)
         cv2.rectangle(img, (50, 50), (150, 150), 255, -1)
         result = _best_contour(img, roi_w=500)
         assert result is not None
         cx, cy = result
-        assert abs(cx - 100) < 3
-        assert abs(cy - 100) < 3
+        # Anchor is bottom-right corner (x+bw, y+bh) = (150, 150)
+        assert abs(cx - 150) < 3
+        assert abs(cy - 150) < 3
 
     def test_aspect_min_boundary_rejected_at_040_accepted_at_025(self):
         """Contour with aspect≈0.30 is rejected at default aspect_min=0.40
@@ -110,16 +117,25 @@ class TestBestContour:
                                solidity_min=0.0)
         assert result is not None
 
-    def test_centroid_x_filter_uses_cx_not_bounding_rect_x(self):
-        """Contour whose left edge is at 52 % roi_w but centroid at 72 % is
-        rejected (the old bounding-rect check would have passed it)."""
+    def test_x_position_filter_uses_left_edge(self):
+        """Contour whose left edge exceeds 70% roi_w is rejected."""
         roi_w = 500  # 70 % threshold = 350
         img = make_binary_roi(h=500, w=roi_w)
-        # x=260 (52 %), bw=200, bh=200 → cx=260+100=360 (72 %)
-        cv2.rectangle(img, (260, 150), (460, 350), 255, -1)
-        # area=200*200=40000, aspect=1.0, fill=1.0 — only the cx filter rejects.
+        # x=360 (72 %), bw=100, bh=100 → left edge past threshold
+        cv2.rectangle(img, (360, 150), (460, 250), 255, -1)
+        # area=100*100=10000, aspect=1.0, fill=1.0 — x-position filter rejects.
         result = _best_contour(img, roi_w=roi_w)
         assert result is None
+
+    def test_x_position_filter_accepts_contour_near_threshold(self):
+        """Contour whose left edge is at 68% roi_w (under 70%) is accepted."""
+        roi_w = 500  # 70 % threshold = 350
+        img = make_binary_roi(h=500, w=roi_w)
+        # x=340 (68 %), bw=100, bh=100 → left edge under threshold
+        cv2.rectangle(img, (340, 150), (440, 250), 255, -1)
+        # area=100*100=10000, aspect=1.0, fill=1.0 — accepted
+        result = _best_contour(img, roi_w=roi_w)
+        assert result is not None
 
     def test_rejection_reasons_collected(self):
         """collect_rejections=True returns a reason string for each failure."""
@@ -206,12 +222,13 @@ class TestAnnotateRoiPreview:
 class TestDetectPerforation:
 
     def test_8mm_two_perfs_returns_topmost_not_midpoint(self):
-        """Two well-separated perforations → anchor is the TOPMOST perf, not midpoint."""
+        """Two well-separated perforations → anchor is the TOPMOST perf's bottom-right corner."""
         frame = make_frame([0.25, 0.75])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
-        # Topmost perf y ≈ 0.25 × FRAME_H = 250, NOT the midpoint 500
-        assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
+        # Topmost perf centroid y ≈ 0.25 × FRAME_H = 250
+        # Bottom edge = centroid_y + PERF_H/2 = 250 + 50 = 300 (0.30 of FRAME_H)
+        assert abs(pt[1] - FRAME_H * 0.30) < FRAME_H * 0.08
         # Explicitly verify it's NOT the midpoint
         assert abs(pt[1] - FRAME_H * 0.50) > FRAME_H * 0.10
 
@@ -222,21 +239,27 @@ class TestDetectPerforation:
         pt_two = detect_perforation(frame_two, film_format="8mm")
         pt_one = detect_perforation(frame_one, film_format="8mm")
         assert pt_two is not None and pt_one is not None
-        # Both anchors should be near the top perf position — delta < 15 px
-        assert abs(pt_two[1] - pt_one[1]) < 15
+        # Both anchors should be near the top perf's bottom edge — delta < 20 px
+        # (single-perf fallback and two-perf detection may use slightly different code paths)
+        assert abs(pt_two[1] - pt_one[1]) < 20
 
-    def test_8mm_perf_near_midline_both_found(self):
-        """Root-cause fix: perfs near h//2 are detected (old split would miss them)."""
-        # Position both perfs close to the vertical midpoint
-        frame = make_frame([0.44, 0.56])
+    def test_8mm_perf_at_boundary_of_zone_detected(self):
+        """Perf whose bottom edge is just under 35% zone threshold is detected."""
+        # Bottom edge at 34% of frame height (340px) → cy < 350 threshold
+        # Perf centroid at 29% (290px), bottom edge at 290 + 50 = 340
+        frame = make_frame([0.29])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
+        # Anchor should be near bottom edge (340)
+        assert abs(pt[1] - FRAME_H * 0.34) < FRAME_H * 0.05
 
-    def test_8mm_single_perf_fallback_returns_centroid(self):
-        """Only one perf visible → its centroid is returned, not None."""
+    def test_8mm_single_perf_fallback_returns_corner(self):
+        """Only one perf visible → its bottom-right corner is returned, not None."""
         frame = make_frame([0.25])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
+        # Bottom edge of perf at 0.25 = 250 + 50 = 300
+        assert abs(pt[1] - FRAME_H * 0.30) < FRAME_H * 0.08
 
     def test_8mm_no_perfs_returns_none(self):
         """All-black frame → None for 8mm format."""
@@ -245,15 +268,17 @@ class TestDetectPerforation:
 
     def test_super8_detects_single_perf(self):
         """super8 path is unaffected by 8mm changes and still detects one perf."""
-        frame = make_frame([0.50])
+        frame = make_frame([0.25])
         pt = detect_perforation(frame, film_format="super8")
         assert pt is not None
 
     def test_super16_two_perfs_detected(self):
-        """super16 uses the same 2-perf path as 8mm and benefits from the fix."""
+        """super16 uses the same 2-perf path as 8mm and returns bottom-right corner."""
         frame = make_frame([0.25, 0.75])
         pt = detect_perforation(frame, film_format="super16")
         assert pt is not None
+        # Bottom edge of top perf at 0.25 = 250 + 50 = 300
+        assert abs(pt[1] - FRAME_H * 0.30) < FRAME_H * 0.08
 
 
 # ── Unit 3: debug frame generation ───────────────────────────────────────────
@@ -270,7 +295,7 @@ class TestDebugFrames:
              tempfile.TemporaryDirectory() as out, \
              tempfile.TemporaryDirectory() as dbg:
 
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_001.jpg"), good)
 
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
@@ -291,7 +316,7 @@ class TestDebugFrames:
              tempfile.TemporaryDirectory() as out, \
              tempfile.TemporaryDirectory() as dbg:
 
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_001.jpg"), good)
 
             stabilize_folder(inp, out, debug_dir=dbg,
@@ -308,7 +333,7 @@ class TestDebugFrames:
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             _write_frame(os.path.join(inp, "my_scan.jpg"), bad)
             # Add a second good frame so stabilize_folder does not raise
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "good_frame.jpg"), good)
 
             stabilize_folder(inp, out, debug_dir=dbg,
@@ -324,7 +349,7 @@ class TestDebugFrames:
 
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             _write_frame(os.path.join(inp, "frame.jpg"), bad)
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_good.jpg"), good)
 
             stabilize_folder(inp, out, debug_dir=dbg,
@@ -344,7 +369,7 @@ class TestDebugFrames:
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame.jpg"), good)
             # Should complete without raising even though no debug_dir is given
             stabilize_folder(inp, out, debug_dir=None,

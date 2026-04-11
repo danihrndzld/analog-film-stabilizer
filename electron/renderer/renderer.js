@@ -246,12 +246,20 @@ previewImg.addEventListener('click', (e) => {
 
   previewAnchor = { x: frameX, y: frameY };
 
+  // ROI boundary: preview shows 40% of frame, ROI is roi_ratio of frame
+  // roiBoundaryX = previewWidth * (roi_ratio / 0.40)
+  const roiRatio = parseFloat(document.getElementById('paramRoi').value) || 0.22;
+  const roiBoundaryX = previewImg.naturalWidth * (roiRatio / 0.40);
+  const isOutsideRoi = frameX > roiBoundaryX;
+
   anchorDot.style.left = e.offsetX + 'px';
   anchorDot.style.top  = e.offsetY + 'px';
+  anchorDot.classList.toggle('is-outside-roi', isOutsideRoi);
   anchorDot.hidden = false;
 
-  previewStatusEl.textContent =
-    `Manual: (${Math.round(frameX)}, ${Math.round(frameY)})`;
+  previewStatusEl.textContent = isOutsideRoi
+    ? `Manual: (${Math.round(frameX)}, ${Math.round(frameY)}) — fuera de zona de detección`
+    : `Manual: (${Math.round(frameX)}, ${Math.round(frameY)})`;
   previewResetBtn.hidden = autoDetectedAnchor === null;
 });
 

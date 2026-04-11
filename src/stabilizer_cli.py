@@ -63,17 +63,17 @@ def run_preview(args):
 
     h, w = frame.shape[:2]
     roi_w = max(50, int(w * args.roi))
-    roi_bgr = frame[:, :roi_w]
+    # Preview shows 40% of frame width for context; detection still uses roi_w
+    preview_w = max(roi_w, int(w * 0.40))
+    preview_bgr = frame[:, :preview_w]
     frame_name = os.path.basename(args.frame_path)
 
     anchor = detect_perforation(frame, roi_ratio=args.roi, film_format=args.film_format)
 
-    # Annotate the ROI crop; rejections list is empty when detection succeeds,
-    # and also empty on failure (rejection boxes require internal binary data
-    # not exposed through detect_perforation's public interface — the
-    # "NO DETECTADO" banner is still shown without them).
+    # Annotate the preview crop; pass roi_w for the boundary indicator
     annotated = _annotate_roi_preview(
-        roi_bgr, anchor, rejections=[], frame_name=frame_name
+        preview_bgr, anchor, rejections=[], frame_name=frame_name,
+        roi_boundary_x=roi_w
     )
     cv2.imwrite(args.preview_out, annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
 

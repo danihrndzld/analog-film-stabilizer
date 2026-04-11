@@ -745,6 +745,11 @@ html, body {
   box-shadow: 0 0 0 1px var(--red);
 }
 
+.anchor-dot.is-outside-roi {
+  background: var(--amber);
+  box-shadow: 0 0 0 1px var(--amber);
+}
+
 .preview-hint {
   font-size: 10px;
   color: var(--text-faint);
