@@ -15,7 +15,6 @@ const progressPct   = document.getElementById('progressPct');
 const logLines      = document.getElementById('logLines');
 const logEmpty      = document.getElementById('logEmpty');
 const paramsSection    = document.getElementById('paramsSection');
-const filmFormatEl     = document.getElementById('filmFormat');
 const debugFramesPathEl = document.getElementById('debugFramesPath');
 
 // ── Preview panel refs ────────────────────────────────────────────────────────
@@ -23,8 +22,6 @@ const previewSection    = document.getElementById('previewSection');
 const previewStatusEl   = document.getElementById('previewStatus');
 const previewImg        = document.getElementById('previewImg');
 const anchorDot         = document.getElementById('anchorDot');
-const previewRefreshBtn = document.getElementById('previewRefreshBtn');
-const previewResetBtn   = document.getElementById('previewResetBtn');
 
 // ── Version badge ─────────────────────────────────────────────────────────────
 const versionBadge = document.getElementById('appVersion');
@@ -57,9 +54,9 @@ window.api.onUpdateNotFound(() => {
 });
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let isRunning          = false;
-let previewAnchor      = null;   // null | { x, y } in frame coords (manual override)
-let autoDetectedAnchor = null;   // null | { x, y } from last Python detection
+let isRunning     = false;
+let previewAnchor = null;   // null | { x, y } in frame coords
+let folderReady   = false;  // true when a valid folder has been selected
 
 // ── Prevent Electron from navigating when files land outside the drop zone ────
 document.addEventListener('dragover', (e) => e.preventDefault());
@@ -155,11 +152,23 @@ function setInputFolder(folderPath) {
   dropContent.hidden = true;
   dropLoaded.hidden  = false;
 
-  runBtn.disabled = false;
-  runBtn.removeAttribute('aria-disabled');
+  folderReady = true;
+  updateRunButton();
 
   addLog(`Carpeta seleccionada: ${folderPath}`);
   triggerPreview();
+}
+
+// ── Run button state ──────────────────────────────────────────────────────────
+function updateRunButton() {
+  // Enabled only when both folder is selected AND anchor is set
+  const canRun = folderReady && previewAnchor !== null && !isRunning;
+  runBtn.disabled = !canRun;
+  if (canRun) {
+    runBtn.removeAttribute('aria-disabled');
+  } else {
+    runBtn.setAttribute('aria-disabled', 'true');
+  }
 }
 
 // ── Preview panel ─────────────────────────────────────────────────────────────
@@ -168,15 +177,13 @@ async function triggerPreview() {
   const input = inputPathEl.value.trim();
   if (!input) return;
 
-  // Reset anchor state immediately so a stale anchor from a previous folder
-  // is never used if the user hits run during the async "Analizando…" window.
-  previewAnchor      = null;
-  autoDetectedAnchor = null;
+  // Reset anchor state for new folder
+  previewAnchor = null;
+  anchorDot.hidden = true;
+  updateRunButton();
 
   previewSection.hidden = false;
-  previewStatusEl.textContent = 'Analizando…';
-  anchorDot.hidden = true;
-  previewResetBtn.hidden = true;
+  previewStatusEl.textContent = 'Cargando…';
 
   const firstFrame = await window.api.listFirstFrame(input);
   if (!firstFrame) {
@@ -187,13 +194,10 @@ async function triggerPreview() {
   let result;
   try {
     result = await window.api.previewFrame({
-      framePath:  firstFrame,
-      roi:        parseFloat(document.getElementById('paramRoi').value)        || 0.22,
-      threshold:  parseInt(document.getElementById('paramThreshold').value, 10) || 210,
-      filmFormat: filmFormatEl.value || 'super8',
+      framePath: firstFrame,
     });
   } catch {
-    previewStatusEl.textContent = 'Error al analizar el frame';
+    previewStatusEl.textContent = 'Error al cargar el frame';
     return;
   }
 
@@ -202,39 +206,8 @@ async function triggerPreview() {
     previewImg.src = 'file://' + result.previewPath + '?t=' + Date.now();
   }
 
-  if (result.detected) {
-    autoDetectedAnchor = { x: result.cx, y: result.cy };
-    previewAnchor      = autoDetectedAnchor;
-    previewStatusEl.textContent =
-      `Auto: (${Math.round(result.cx)}, ${Math.round(result.cy)})`;
-  } else {
-    autoDetectedAnchor = null;
-    previewAnchor      = null;
-    previewStatusEl.textContent = 'No detectado — haz clic para marcar manualmente';
-  }
+  previewStatusEl.textContent = 'Haz clic para seleccionar referencia';
 }
-
-// Re-detect when film format changes (different format → different detection params)
-filmFormatEl.addEventListener('change', () => {
-  previewAnchor = null;
-  triggerPreview();
-});
-
-// Actualizar: re-run preview with current advanced params
-previewRefreshBtn.addEventListener('click', () => {
-  previewAnchor = null;
-  triggerPreview();
-});
-
-// Restablecer: revert manual override to last auto-detected anchor
-previewResetBtn.addEventListener('click', () => {
-  previewAnchor  = autoDetectedAnchor;
-  anchorDot.hidden = true;
-  previewResetBtn.hidden = true;
-  previewStatusEl.textContent = autoDetectedAnchor
-    ? `Auto: (${Math.round(autoDetectedAnchor.x)}, ${Math.round(autoDetectedAnchor.y)})`
-    : 'No detectado — haz clic para marcar manualmente';
-});
 
 // Click-to-set-anchor: map click position back to frame coordinates
 previewImg.addEventListener('click', (e) => {
@@ -246,21 +219,14 @@ previewImg.addEventListener('click', (e) => {
 
   previewAnchor = { x: frameX, y: frameY };
 
-  // ROI boundary: preview shows 40% of frame, ROI is roi_ratio of frame
-  // roiBoundaryX = previewWidth * (roi_ratio / 0.40)
-  const roiRatio = parseFloat(document.getElementById('paramRoi').value) || 0.22;
-  const roiBoundaryX = previewImg.naturalWidth * (roiRatio / 0.40);
-  const isOutsideRoi = frameX > roiBoundaryX;
-
   anchorDot.style.left = e.offsetX + 'px';
   anchorDot.style.top  = e.offsetY + 'px';
-  anchorDot.classList.toggle('is-outside-roi', isOutsideRoi);
   anchorDot.hidden = false;
 
-  previewStatusEl.textContent = isOutsideRoi
-    ? `Manual: (${Math.round(frameX)}, ${Math.round(frameY)}) — fuera de zona de detección`
-    : `Manual: (${Math.round(frameX)}, ${Math.round(frameY)})`;
-  previewResetBtn.hidden = autoDetectedAnchor === null;
+  previewStatusEl.textContent =
+    `Referencia: (${Math.round(frameX)}, ${Math.round(frameY)})`;
+
+  updateRunButton();
 });
 
 // ── Run / Cancel ──────────────────────────────────────────────────────────────
@@ -275,7 +241,7 @@ runBtn.addEventListener('click', () => {
 function startProcess() {
   const input  = inputPathEl.value.trim();
   const output = outputPathEl.value.trim();
-  if (!input || !output) return;
+  if (!input || !output || !previewAnchor) return;
 
   setRunning(true);
   setProgress(0);
@@ -286,15 +252,12 @@ function startProcess() {
   window.api.startProcess({
     input,
     output,
-    roi:           parseFloat(document.getElementById('paramRoi').value)        || 0.22,
-    threshold:     parseInt(document.getElementById('paramThreshold').value, 10) || 210,
-    smooth:        parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
-    quality:       parseInt(document.getElementById('paramQuality').value, 10),  // 0 is valid (PNG)
-    filmFormat:    filmFormatEl.value || 'super8',
-    debugFrames:   debugFramesPathEl.value.trim(),
-    manualAnchorX: previewAnchor?.x ?? null,
-    manualAnchorY: previewAnchor?.y ?? null,
-    borderMode:    document.getElementById('paramBorderMode').value || 'replicate',
+    smooth:      parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
+    quality:     (q => Number.isFinite(q) ? q : 95)(parseInt(document.getElementById('paramQuality').value, 10)),
+    debugFrames: debugFramesPathEl.value.trim(),
+    anchorX:     previewAnchor.x,
+    anchorY:     previewAnchor.y,
+    borderMode:  document.getElementById('paramBorderMode').value || 'replicate',
   });
 }
 
@@ -308,8 +271,7 @@ function setRunning(running) {
   isRunning = running;
   runBtn.textContent = running ? 'Cancelar' : 'Estabilizar secuencia';
   runBtn.classList.toggle('is-running', running);
-  runBtn.disabled = false;
-  runBtn.removeAttribute('aria-disabled');
+  updateRunButton();
 }
 
 // ── Progress helper ───────────────────────────────────────────────────────────
@@ -352,22 +314,19 @@ function addLog(msg, type = '') {
 
   const line = document.createElement('div');
   line.className = 'log-line' + (type ? ` log-line--${type}` : '');
-  line.innerHTML =
-    `<span class="log-ts" aria-hidden="true">${ts}</span>${escapeHtml(msg)}`;
+
+  const tsSpan = document.createElement('span');
+  tsSpan.className = 'log-ts';
+  tsSpan.setAttribute('aria-hidden', 'true');
+  tsSpan.textContent = ts;
+  line.appendChild(tsSpan);
+  line.appendChild(document.createTextNode(msg));
 
   logLines.appendChild(line);
   // Scroll to bottom (non-blocking)
   requestAnimationFrame(() => {
     logLines.scrollTop = logLines.scrollHeight;
   });
-}
-
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 // ── Sync aria-expanded on <details> ──────────────────────────────────────────
@@ -392,34 +351,48 @@ window.api.onUpdateAvailable((info) => {
   const banner = document.createElement('div');
   banner.id        = 'updateBanner';
   banner.className = 'update-banner';
-  banner.innerHTML =
-    `<span class="update-banner__text">
-       Nueva versión <strong>v${escapeHtml(info.version)}</strong> disponible
-     </span>
-     <button class="update-banner__btn" id="updateBtn">Actualizar</button>
-     <button class="update-banner__dismiss" id="updateDismissBtn" aria-label="Cerrar">✕</button>`;
+
+  const text = document.createElement('span');
+  text.className = 'update-banner__text';
+  const strong = document.createElement('strong');
+  strong.textContent = `v${info.version}`;
+  text.appendChild(document.createTextNode('Nueva versión '));
+  text.appendChild(strong);
+  text.appendChild(document.createTextNode(' disponible'));
+  banner.appendChild(text);
+
+  const updateBtn = document.createElement('button');
+  updateBtn.className = 'update-banner__btn';
+  updateBtn.id = 'updateBtn';
+  updateBtn.textContent = 'Actualizar';
+  banner.appendChild(updateBtn);
+
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'update-banner__dismiss';
+  dismissBtn.id = 'updateDismissBtn';
+  dismissBtn.setAttribute('aria-label', 'Cerrar');
+  dismissBtn.textContent = '\u2715';
+  banner.appendChild(dismissBtn);
 
   document.querySelector('.app').prepend(banner);
 
-  document.getElementById('updateDismissBtn').addEventListener('click', () => banner.remove());
+  dismissBtn.addEventListener('click', () => banner.remove());
 
-  document.getElementById('updateBtn').addEventListener('click', async () => {
-    const btn = document.getElementById('updateBtn');
-    btn.disabled    = true;
-    btn.textContent = 'Descargando…';
+  updateBtn.addEventListener('click', async () => {
+    updateBtn.disabled    = true;
+    updateBtn.textContent = 'Descargando…';
 
     window.api.onUpdateDownloadProgress((p) => {
-      btn.textContent = `${Math.round(p * 100)}%`;
+      updateBtn.textContent = `${Math.round(p * 100)}%`;
     });
 
     try {
       await window.api.downloadUpdate({ downloadUrl: info.downloadUrl, assetName: info.assetName });
-      btn.textContent = '¡Listo!';
-      banner.querySelector('.update-banner__text').textContent =
-        'Abre el DMG y arrastra la app para reemplazar la versión actual.';
+      updateBtn.textContent = '¡Listo!';
+      text.textContent = 'Abre el DMG y arrastra la app para reemplazar la versión actual.';
     } catch {
-      btn.disabled    = false;
-      btn.textContent = 'Actualizar';
+      updateBtn.disabled    = false;
+      updateBtn.textContent = 'Actualizar';
       window.api.openExternal(info.releaseUrl);
     }
   });

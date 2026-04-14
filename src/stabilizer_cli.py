@@ -5,13 +5,11 @@ Streams JSON-lines to stdout so Electron can consume progress and logs.
 
 Modes:
   batch (default)
-    --input DIR --output DIR [--roi F] [--threshold N] [--smooth N]
-    [--quality N] [--film-format super8|8mm|super16] [--debug-frames DIR]
-    [--manual-anchor-x N --manual-anchor-y N]
+    --input DIR --output DIR --anchor-x N --anchor-y N
+    [--smooth N] [--quality N] [--debug-frames DIR] [--border-mode STR]
 
   preview
-    --frame-path FILE --preview-out FILE [--roi F] [--threshold N]
-    [--film-format super8|8mm|super16]
+    --frame-path FILE --preview-out FILE
 
 Output lines (one per line, each valid JSON):
   Batch mode:
@@ -21,13 +19,11 @@ Output lines (one per line, each valid JSON):
     {"type": "error",    "msg":  "..."}
 
   Preview mode (single line):
-    {"type": "preview", "detected": true|false,
-     "cx": N|null, "cy": N|null, "previewPath": "..."|null}
+    {"type": "preview", "previewPath": "..."|null}
 """
 
 import argparse
 import json
-import math
 import os
 import sys
 
@@ -36,8 +32,6 @@ import cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from perforation_stabilizer_app import (
-    _annotate_roi_preview,
-    detect_perforation,
     stabilize_folder,
 )
 
@@ -47,70 +41,30 @@ def emit(obj):
 
 
 def run_preview(args):
-    """Run single-frame detection and save an annotated preview JPEG."""
+    """Save a preview JPEG of the first frame for the UI."""
     frame = cv2.imread(args.frame_path)
     if frame is None:
-        emit(
-            {
-                "type": "preview",
-                "detected": False,
-                "cx": None,
-                "cy": None,
-                "previewPath": None,
-            }
-        )
+        emit({"type": "preview", "previewPath": None})
         return
 
-    h, w = frame.shape[:2]
-    roi_w = max(50, int(w * args.roi))
-    # Preview shows 40% of frame width for context; detection still uses roi_w
-    preview_w = max(roi_w, int(w * 0.40))
-    preview_bgr = frame[:, :preview_w]
-    frame_name = os.path.basename(args.frame_path)
-
-    anchor = detect_perforation(frame, roi_ratio=args.roi, film_format=args.film_format)
-
-    # Annotate the preview crop; pass roi_w for the boundary indicator
-    annotated = _annotate_roi_preview(
-        preview_bgr, anchor, rejections=[], frame_name=frame_name,
-        roi_boundary_x=roi_w
-    )
-    cv2.imwrite(args.preview_out, annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-
-    emit(
-        {
-            "type": "preview",
-            "detected": anchor is not None,
-            "cx": float(anchor[0])
-            if anchor is not None and math.isfinite(anchor[0])
-            else None,
-            "cy": float(anchor[1])
-            if anchor is not None and math.isfinite(anchor[1])
-            else None,
-            "previewPath": args.preview_out,
-        }
-    )
+    cv2.imwrite(args.preview_out, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    emit({"type": "preview", "previewPath": args.preview_out})
 
 
 def run_batch(args):
     """Run the full stabilisation batch."""
-    manual_anchor = None
-    if args.manual_anchor_x is not None and args.manual_anchor_y is not None:
-        manual_anchor = (args.manual_anchor_x, args.manual_anchor_y)
+    anchor = (args.anchor_x, args.anchor_y)
 
     try:
         summary = stabilize_folder(
             input_dir=args.input,
             output_dir=args.output,
+            anchor=anchor,
             progress_cb=lambda v: emit({"type": "progress", "value": v}),
             log_cb=lambda m: emit({"type": "log", "msg": m}),
-            roi_ratio=args.roi,
-            threshold=args.threshold,
             smooth_radius=args.smooth,
             jpeg_quality=args.quality,
-            film_format=args.film_format,
             debug_dir=args.debug_frames,
-            manual_anchor=manual_anchor,
             border_mode=args.border_mode,
         )
         emit({"type": "done", "summary": summary})
@@ -130,23 +84,21 @@ def main():
         help="Operation mode: batch (default) or preview",
     )
 
-    # ── Shared params (both modes) ────────────────────────────────────────────
-    parser.add_argument(
-        "--roi", type=float, default=0.22, help="ROI fraction (default 0.22)"
-    )
-    parser.add_argument(
-        "--threshold", type=int, default=210, help="Brightness threshold (default 210)"
-    )
-    parser.add_argument(
-        "--film-format",
-        choices=["super8", "8mm", "super16"],
-        default="super8",
-        help="Film format: super8 (default), 8mm, super16",
-    )
-
     # ── Batch-mode params ─────────────────────────────────────────────────────
     parser.add_argument("--input", default=None, help="Input folder with frames")
     parser.add_argument("--output", default=None, help="Output folder")
+    parser.add_argument(
+        "--anchor-x",
+        type=float,
+        default=None,
+        help="Reference anchor X coordinate (required for batch)",
+    )
+    parser.add_argument(
+        "--anchor-y",
+        type=float,
+        default=None,
+        help="Reference anchor Y coordinate (required for batch)",
+    )
     parser.add_argument(
         "--smooth", type=int, default=9, help="Moving-average radius (default 9)"
     )
@@ -160,18 +112,6 @@ def main():
         help="Optional folder for failed-frame debug JPEGs",
     )
     parser.add_argument(
-        "--manual-anchor-x",
-        type=float,
-        default=None,
-        help="Override target anchor X (skips median computation)",
-    )
-    parser.add_argument(
-        "--manual-anchor-y",
-        type=float,
-        default=None,
-        help="Override target anchor Y (skips median computation)",
-    )
-    parser.add_argument(
         "--border-mode",
         choices=["replicate", "constant", "reflect"],
         default="replicate",
@@ -183,7 +123,7 @@ def main():
         "--frame-path", default=None, help="Path to single frame for preview mode"
     )
     parser.add_argument(
-        "--preview-out", default=None, help="Output path for annotated preview JPEG"
+        "--preview-out", default=None, help="Output path for preview JPEG"
     )
 
     args = parser.parse_args()
@@ -204,6 +144,14 @@ def main():
                 {
                     "type": "error",
                     "msg": "--input and --output are required in batch mode",
+                }
+            )
+            sys.exit(1)
+        if args.anchor_x is None or args.anchor_y is None:
+            emit(
+                {
+                    "type": "error",
+                    "msg": "--anchor-x and --anchor-y are required in batch mode",
                 }
             )
             sys.exit(1)

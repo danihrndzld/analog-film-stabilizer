@@ -114,34 +114,19 @@
         </div>
       </div>
 
-      <!-- Film format selector -->
-      <div class="format-section" role="group" aria-label="Formato de película">
-        <label class="format-label" for="filmFormat">Formato de película</label>
-        <select class="format-select" id="filmFormat" aria-describedby="filmFormatHint">
-          <option value="super8" selected>Super 8 — 1 perf, izquierda</option>
-          <option value="8mm">8mm Regular — 2 perfs, izquierda</option>
-          <option value="super16">Super 16 — 2 perfs, izquierda</option>
-        </select>
-        <span class="format-hint" id="filmFormatHint">determina en qué lado se busca la perforación</span>
-      </div>
-
-      <!-- Preview: reference detection panel -->
+      <!-- Preview: reference point selection panel -->
       <section class="preview-section" id="previewSection" hidden
-               aria-label="Vista previa de detección de perforación">
+               aria-label="Selección de punto de referencia">
         <div class="preview-header">
-          <span class="preview-label">Referencia de estabilización</span>
-          <span class="preview-status" id="previewStatus">Analizando…</span>
-          <div class="preview-actions">
-            <button class="btn-secondary btn-secondary--sm" id="previewRefreshBtn" type="button">Actualizar</button>
-            <button class="btn-secondary btn-secondary--sm preview-reset-btn" id="previewResetBtn" type="button" hidden>Restablecer</button>
-          </div>
+          <span class="preview-label">Selecciona punto de referencia</span>
+          <span class="preview-status" id="previewStatus">Cargando…</span>
         </div>
         <div class="preview-img-wrap" id="previewImgWrap">
           <img class="preview-img" id="previewImg"
-               alt="Vista previa de detección de perforación en primer frame">
+               alt="Vista previa del primer frame — haz clic para seleccionar referencia">
           <div class="anchor-dot" id="anchorDot" hidden aria-hidden="true"></div>
         </div>
-        <p class="preview-hint">Haz clic en la imagen para ajustar el punto de referencia manualmente</p>
+        <p class="preview-hint">Haz clic en la imagen para seleccionar el punto de referencia</p>
       </section>
 
       <!-- Advanced params -->
@@ -156,20 +141,6 @@
         </summary>
         <div class="params-body">
           <div class="params-grid">
-            <div class="param-field">
-              <label class="param-label" for="paramRoi">ROI (fracción)</label>
-              <input class="param-input" id="paramRoi"
-                     type="number" value="0.22" step="0.01" min="0.05" max="0.5"
-                     aria-describedby="roiHint">
-              <span class="param-hint" id="roiHint">fracción del ancho</span>
-            </div>
-            <div class="param-field">
-              <label class="param-label" for="paramThreshold">Umbral</label>
-              <input class="param-input" id="paramThreshold"
-                     type="number" value="210" step="1" min="50" max="255"
-                     aria-describedby="thresholdHint">
-              <span class="param-hint" id="thresholdHint">brillo 0–255</span>
-            </div>
             <div class="param-field">
               <label class="param-label" for="paramSmooth">Suavizado</label>
               <input class="param-input" id="paramSmooth"

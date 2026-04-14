@@ -124,38 +124,28 @@ ipcMain.handle('start-process', (event, opts) => {
     const binaryName = process.arch === 'arm64' ? 'stabilizer_arm64' : 'stabilizer_x64';
     executable = path.join(process.resourcesPath, binaryName);
     args = [
-      '--input',       opts.input,
-      '--output',      opts.output,
-      '--roi',         String(opts.roi),
-      '--threshold',   String(opts.threshold),
-      '--smooth',      String(opts.smooth),
-      '--quality',     String(opts.quality),
-      '--film-format', String(opts.filmFormat || 'super8'),
+      '--input',    opts.input,
+      '--output',   opts.output,
+      '--anchor-x', String(opts.anchorX),
+      '--anchor-y', String(opts.anchorY),
+      '--smooth',   String(opts.smooth),
+      '--quality',  String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
-    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
-      args.push('--manual-anchor-x', String(opts.manualAnchorX),
-                '--manual-anchor-y', String(opts.manualAnchorY));
-    }
     if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
     args = [
       scriptPath,
-      '--input',       opts.input,
-      '--output',      opts.output,
-      '--roi',         String(opts.roi),
-      '--threshold',   String(opts.threshold),
-      '--smooth',      String(opts.smooth),
-      '--quality',     String(opts.quality),
-      '--film-format', String(opts.filmFormat || 'super8'),
+      '--input',    opts.input,
+      '--output',   opts.output,
+      '--anchor-x', String(opts.anchorX),
+      '--anchor-y', String(opts.anchorY),
+      '--smooth',   String(opts.smooth),
+      '--quality',  String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
-    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
-      args.push('--manual-anchor-x', String(opts.manualAnchorX),
-                '--manual-anchor-y', String(opts.manualAnchorY));
-    }
     if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
   }
 
@@ -230,7 +220,7 @@ ipcMain.handle('cancel-process', () => {
 });
 
 // ── IPC: Single-frame preview ─────────────────────────────────────────────────
-// Runs --mode preview on one frame; returns { detected, cx, cy, previewPath }.
+// Runs --mode preview on one frame; returns { previewPath }.
 ipcMain.handle('preview-frame', (event, opts) => {
   const previewOut = path.join(os.tmpdir(), 'stabilizer_preview.jpg');
 
@@ -242,9 +232,6 @@ ipcMain.handle('preview-frame', (event, opts) => {
       '--mode',        'preview',
       '--frame-path',  opts.framePath,
       '--preview-out', previewOut,
-      '--roi',         String(opts.roi        || 0.22),
-      '--threshold',   String(opts.threshold  || 210),
-      '--film-format', String(opts.filmFormat || 'super8'),
     ];
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
@@ -254,9 +241,6 @@ ipcMain.handle('preview-frame', (event, opts) => {
       '--mode',        'preview',
       '--frame-path',  opts.framePath,
       '--preview-out', previewOut,
-      '--roi',         String(opts.roi        || 0.22),
-      '--threshold',   String(opts.threshold  || 210),
-      '--film-format', String(opts.filmFormat || 'super8'),
     ];
   }
 
@@ -265,20 +249,17 @@ ipcMain.handle('preview-frame', (event, opts) => {
     const proc = spawn(executable, args);
     proc.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
     proc.on('error', (err) => {
-      resolve({ detected: false, error: err.message });
+      resolve({ previewPath: null, error: err.message });
     });
     proc.on('close', () => {
       try {
         const line = stdout.trim().split('\n').find(l => l.trim());
         const msg  = JSON.parse(line);
         resolve({
-          detected:    msg.detected    || false,
-          cx:          msg.cx          ?? null,
-          cy:          msg.cy          ?? null,
           previewPath: msg.previewPath ?? null,
         });
       } catch {
-        resolve({ detected: false, error: 'Failed to parse preview result' });
+        resolve({ previewPath: null, error: 'Failed to parse preview result' });
       }
     });
   });

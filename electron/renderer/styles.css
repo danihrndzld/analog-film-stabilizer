@@ -374,44 +374,6 @@ html, body {
   outline-offset: 2px;
 }
 
-/* ── Film format selector ─────────────────────────────────────────────────── */
-
-.format-section {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.format-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.format-select {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: 12px;
-  padding: 6px 10px;
-  outline: none;
-  cursor: pointer;
-  transition: border-color 0.15s;
-}
-
-.format-select:focus {
-  border-color: var(--amber);
-}
-
-.format-hint {
-  font-size: 10px;
-  color: var(--text-faint);
-}
-
 /* ── Advanced params ──────────────────────────────────────────────────────── */
 
 .params-section {
@@ -743,11 +705,6 @@ html, body {
   transform: translate(-50%, -50%);
   pointer-events: none;
   box-shadow: 0 0 0 1px var(--red);
-}
-
-.anchor-dot.is-outside-roi {
-  background: var(--amber);
-  box-shadow: 0 0 0 1px var(--amber);
 }
 
 .preview-hint {
