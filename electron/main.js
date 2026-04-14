@@ -137,7 +137,9 @@ ipcMain.handle('start-process', (event, opts) => {
       args.push('--manual-anchor-x', String(opts.manualAnchorX),
                 '--manual-anchor-y', String(opts.manualAnchorY));
     }
-    if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
+    if (opts.borderMode)  args.push('--border-mode', String(opts.borderMode));
+    if (opts.rectWidth  != null) args.push('--rect-width',  String(opts.rectWidth));
+    if (opts.rectHeight != null) args.push('--rect-height', String(opts.rectHeight));
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
@@ -156,7 +158,9 @@ ipcMain.handle('start-process', (event, opts) => {
       args.push('--manual-anchor-x', String(opts.manualAnchorX),
                 '--manual-anchor-y', String(opts.manualAnchorY));
     }
-    if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
+    if (opts.borderMode)  args.push('--border-mode', String(opts.borderMode));
+    if (opts.rectWidth  != null) args.push('--rect-width',  String(opts.rectWidth));
+    if (opts.rectHeight != null) args.push('--rect-height', String(opts.rectHeight));
   }
 
   pyProcess = spawn(executable, args);
@@ -227,61 +231,6 @@ ipcMain.handle('cancel-process', () => {
     pyProcess.kill('SIGTERM');
     pyProcess = null;
   }
-});
-
-// ── IPC: Single-frame preview ─────────────────────────────────────────────────
-// Runs --mode preview on one frame; returns { detected, cx, cy, previewPath }.
-ipcMain.handle('preview-frame', (event, opts) => {
-  const previewOut = path.join(os.tmpdir(), 'stabilizer_preview.jpg');
-
-  let executable, args;
-  if (app.isPackaged) {
-    const binaryName = process.arch === 'arm64' ? 'stabilizer_arm64' : 'stabilizer_x64';
-    executable = path.join(process.resourcesPath, binaryName);
-    args = [
-      '--mode',        'preview',
-      '--frame-path',  opts.framePath,
-      '--preview-out', previewOut,
-      '--roi',         String(opts.roi        || 0.22),
-      '--threshold',   String(opts.threshold  || 210),
-      '--film-format', String(opts.filmFormat || 'super8'),
-    ];
-  } else {
-    const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
-    executable = 'python3';
-    args = [
-      scriptPath,
-      '--mode',        'preview',
-      '--frame-path',  opts.framePath,
-      '--preview-out', previewOut,
-      '--roi',         String(opts.roi        || 0.22),
-      '--threshold',   String(opts.threshold  || 210),
-      '--film-format', String(opts.filmFormat || 'super8'),
-    ];
-  }
-
-  return new Promise((resolve) => {
-    let stdout = '';
-    const proc = spawn(executable, args);
-    proc.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
-    proc.on('error', (err) => {
-      resolve({ detected: false, error: err.message });
-    });
-    proc.on('close', () => {
-      try {
-        const line = stdout.trim().split('\n').find(l => l.trim());
-        const msg  = JSON.parse(line);
-        resolve({
-          detected:    msg.detected    || false,
-          cx:          msg.cx          ?? null,
-          cy:          msg.cy          ?? null,
-          previewPath: msg.previewPath ?? null,
-        });
-      } catch {
-        resolve({ detected: false, error: 'Failed to parse preview result' });
-      }
-    });
-  });
 });
 
 // ── IPC: First image file in a folder ────────────────────────────────────────

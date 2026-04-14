@@ -54,12 +54,17 @@ def _best_contour(
 ):
     """Return top_n perforation candidates from a binary image as (cx, cy) tuples.
 
+    The anchor point is the contour centroid (center of mass), which averages
+    over the entire contour area.  This is far less sensitive to boundary noise
+    than a corner point — a 1px boundary shift moves the centroid by ~1/N pixels
+    (where N is the number of contour pixels).
+
     Parameters
     ----------
     thresh : np.ndarray
         Binary image (uint8) to search for contours.
     roi_w : int
-        Width of the ROI strip; used for the centroid-x position filter.
+        Width of the ROI strip; used for the x-position filter.
     top_n : int
         Maximum number of candidates to return.
     aspect_min : float
@@ -103,12 +108,12 @@ def _best_contour(
                 rejections.append((x, y, bw, bh, "solidity"))
             continue
 
-        # Compute centroid BEFORE the x-position filter so we use the true
-        # centre of mass rather than the bounding rect left edge.
+        # Compute centroid (center of mass) from contour moments.
         M = cv2.moments(cnt)
-        cx = M["m10"] / M["m00"] if M["m00"] != 0 else x + bw / 2.0
-        cy = M["m01"] / M["m00"] if M["m00"] != 0 else y + bh / 2.0
+        cx = M["m10"] / M["m00"] if M["m00"] != 0 else float(x + bw / 2)
+        cy = M["m01"] / M["m00"] if M["m00"] != 0 else float(y + bh / 2)
 
+        # X-position filter: reject perforations too far right in the ROI.
         if cx > roi_w * 0.70:
             if collect_rejections:
                 rejections.append((x, y, bw, bh, "centroid-x"))
@@ -217,26 +222,33 @@ def _save_debug_frame(roi_bgr, rejections, frame_name, debug_dir):
         pass
 
 
-def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=""):
-    """Return an annotated copy of an ROI-crop image for the UI preview panel.
+def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name="", roi_boundary_x=None):
+    """Return an annotated copy of a preview image for the UI preview panel.
 
     When anchor is not None (detection succeeded), draws a green crosshair and
     a "DETECTADO" label at the anchor position.  When anchor is None, draws
     rejected contour bounding rects in red with reason labels and a "NO
     DETECTADO" overlay — mirroring the _save_debug_frame style.
 
+    When roi_boundary_x is provided, draws a subtle vertical line to indicate
+    the detection zone boundary (the preview may be wider than the ROI to
+    provide context).
+
     Does NOT write to disk; the caller is responsible for saving.
 
     Parameters
     ----------
     roi_bgr : np.ndarray
-        BGR ROI crop (left strip of the source frame).
+        BGR preview crop (may be wider than ROI for context).
     anchor : tuple(float, float) or None
         Detected anchor (cx, cy) in full-frame coordinates, or None.
     rejections : list of (x, y, bw, bh, reason_str)
         Rejected contour info from _best_contour(collect_rejections=True).
     frame_name : str
         Source frame basename used for the filename overlay label.
+    roi_boundary_x : int or None
+        X coordinate of the ROI boundary. When provided, draws a vertical line
+        to show where detection happens vs. context area.
 
     Returns
     -------
@@ -247,6 +259,17 @@ def _annotate_roi_preview(roi_bgr, anchor, rejections, frame_name=""):
 
     font_scale = max(0.3, h / 3000.0)
     thickness = 1
+
+    # ROI boundary indicator (dashed amber line)
+    if roi_boundary_x is not None and 0 < roi_boundary_x < w:
+        amber = (0, 191, 255)  # BGR for amber/orange
+        dash_len = max(8, int(h * 0.01))
+        gap_len = max(4, int(h * 0.005))
+        y = 0
+        while y < h:
+            y_end = min(y + dash_len, h)
+            cv2.line(img, (roi_boundary_x, y), (roi_boundary_x, y_end), amber, 1, cv2.LINE_AA)
+            y = y_end + gap_len
 
     # Frame-name overlay (top-left, yellow)
     if frame_name:
@@ -371,6 +394,7 @@ def _detect_by_edge_projection(
     -------
     (float, float) or None
         (cx, cy) of the detected perforation centroid, or None if not found.
+        cx is nan (interpolated from neighbors); cy is the midpoint of the perf.
     """
     # 1. Grayscale + Sobel-Y (horizontal edge detection)
     gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
@@ -583,12 +607,13 @@ def detect_perforation(
 
         if len(candidates) >= 1:
             # Per-hole quality validation: for 8mm/super16 the top perforation
-            # sits at the frame boundary — its centroid should appear in the
-            # upper 30 % of the frame height.  Candidates below that threshold
-            # are almost certainly the bottom perf, a frame-separator artefact,
-            # or bright film content leaking into the ROI.
+            # sits at the frame boundary — its anchor (bottom-right corner)
+            # should appear in the upper 35 % of the frame height.  Candidates
+            # below that threshold are almost certainly the bottom perf, a
+            # frame-separator artefact, or bright film content leaking into
+            # the ROI.
             #
-            # Keeping only top-zone candidates (cy < 30 % of frame height):
+            # Keeping only top-zone candidates (centroid cy < 30 % of frame):
             #   • Eliminates the false-positive zone between the two perfs.
             #   • Recovers frames where one valid top-perf contour was found
             #     alongside a spurious bottom candidate — previously the
@@ -662,6 +687,241 @@ _BORDER_MODES = {
 }
 
 
+# ── Template matching alignment ──────────────────────────────────────────────
+
+
+def _build_perforation_template(
+    frame, anchor, roi_ratio=0.22, padding=20,
+    rect_width=None, rect_height=None,
+):
+    """Extract a grayscale patch around the detected perforation for template matching.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Full BGR frame.
+    anchor : tuple(float, float)
+        Detected (cx, cy) in full-frame coordinates.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+    padding : int
+        Extra pixels around the perforation bounding region.
+    rect_width : float or None
+        User-defined template width in pixels (overrides auto-estimate).
+    rect_height : float or None
+        User-defined template height in pixels (overrides auto-estimate).
+
+    Returns
+    -------
+    (template, origin) : (np.ndarray, (int, int))
+        Grayscale template patch and the (x0, y0) origin of the patch in the ROI.
+        Returns (None, None) if extraction fails.
+    """
+    h, w = frame.shape[:2]
+    roi_w = max(50, int(w * roi_ratio))
+    roi_bgr = frame[:, :roi_w]
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    cx, cy = anchor
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return None, None
+
+    if rect_width is not None and rect_height is not None:
+        if not (np.isfinite(rect_width) and np.isfinite(rect_height)
+                and rect_width > 0 and rect_height > 0):
+            return None, None
+        # User-defined rectangle: anchor is top-left corner
+        x0 = max(0, int(cx))
+        y0 = max(0, int(cy))
+        x1 = min(roi_w, int(cx + rect_width))
+        y1 = min(h, int(cy + rect_height))
+    else:
+        # Estimate perforation size from ROI dimensions (typically ~8-15% of ROI width)
+        est_perf_w = int(roi_w * 0.35)
+        est_perf_h = int(h * 0.08)
+        x0 = max(0, int(cx - est_perf_w // 2 - padding))
+        y0 = max(0, int(cy - est_perf_h // 2 - padding))
+        x1 = min(roi_w, int(cx + est_perf_w // 2 + padding))
+        y1 = min(h, int(cy + est_perf_h // 2 + padding))
+
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return None, None
+
+    template = gray[y0:y1, x0:x1].copy()
+    return template, (x0, y0)
+
+
+def _build_averaged_template(
+    frames_and_anchors, roi_ratio=0.22, padding=20,
+    rect_width=None, rect_height=None,
+):
+    """Build a noise-reduced template by averaging patches from multiple frames.
+
+    Parameters
+    ----------
+    frames_and_anchors : list of (np.ndarray, (float, float))
+        List of (frame, anchor) tuples from successful detections.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+    padding : int
+        Extra pixels around the perforation.
+    rect_width : float or None
+        User-defined template width in pixels.
+    rect_height : float or None
+        User-defined template height in pixels.
+
+    Returns
+    -------
+    (template, origin) : (np.ndarray, (int, int)) or (None, None)
+    """
+    patches = []
+    origin = None
+    for frame, anchor in frames_and_anchors:
+        tpl, orig = _build_perforation_template(
+            frame, anchor, roi_ratio, padding,
+            rect_width=rect_width, rect_height=rect_height,
+        )
+        if tpl is not None:
+            if origin is None:
+                origin = orig
+                patches.append(tpl.astype(np.float32))
+            elif tpl.shape == patches[0].shape:
+                patches.append(tpl.astype(np.float32))
+
+    if not patches:
+        return None, None
+
+    averaged = np.mean(patches, axis=0).astype(np.uint8)
+    return averaged, origin
+
+
+def _template_match_perforation(frame, template, roi_ratio=0.22, min_confidence=0.4):
+    """Locate the perforation in a frame using normalized cross-correlation.
+
+    Uses cv2.matchTemplate with TM_CCOEFF_NORMED and parabolic sub-pixel
+    refinement on the correlation peak.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Full BGR frame.
+    template : np.ndarray
+        Grayscale perforation template patch.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+    min_confidence : float
+        Minimum NCC score to accept the match (0.0-1.0).
+
+    Returns
+    -------
+    (cx, cy, confidence) or None
+        Sub-pixel (cx, cy) in ROI coordinates and NCC confidence score,
+        or None if the match is below min_confidence.
+    """
+    h, w = frame.shape[:2]
+    roi_w = max(50, int(w * roi_ratio))
+    roi_bgr = frame[:, :roi_w]
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    th, tw = template.shape[:2]
+    if gray.shape[0] < th or gray.shape[1] < tw:
+        return None
+
+    result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+    if max_val < min_confidence:
+        return None
+
+    mx, my = max_loc  # top-left of best match (integer)
+
+    # Sub-pixel refinement via parabolic interpolation on the correlation surface
+    rh, rw = result.shape
+    sx, sy = float(mx), float(my)
+
+    if 0 < mx < rw - 1:
+        left = float(result[my, mx - 1])
+        center = float(result[my, mx])
+        right = float(result[my, mx + 1])
+        denom = 2.0 * (2.0 * center - left - right)
+        if abs(denom) > 1e-6:
+            sx = mx + (left - right) / denom
+
+    if 0 < my < rh - 1:
+        top = float(result[my - 1, mx])
+        center = float(result[my, mx])
+        bottom = float(result[my + 1, mx])
+        denom = 2.0 * (2.0 * center - top - bottom)
+        if abs(denom) > 1e-6:
+            sy = my + (top - bottom) / denom
+
+    # Convert from match top-left to template center
+    cx = sx + tw / 2.0
+    cy = sy + th / 2.0
+
+    return (cx, cy, max_val)
+
+
+def _estimate_rotation(frame, template, cx, cy, roi_ratio=0.22):
+    """Estimate small rotation angle of the perforation region using ECC.
+
+    Uses cv2.findTransformECC with MOTION_EUCLIDEAN (translation + rotation)
+    on a tight crop around the template-matched position.  Returns the rotation
+    angle in degrees, or 0.0 if ECC fails to converge.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Full BGR frame.
+    template : np.ndarray
+        Grayscale perforation template patch.
+    cx, cy : float
+        Template-matched center position in ROI coordinates.
+    roi_ratio : float
+        Fraction of frame width used as ROI.
+
+    Returns
+    -------
+    float
+        Rotation angle in degrees (positive = counter-clockwise).
+    """
+    h, w = frame.shape[:2]
+    roi_w = max(50, int(w * roi_ratio))
+    roi_bgr = frame[:, :roi_w]
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    th, tw = template.shape[:2]
+    # Extract the matched region from the current frame
+    x0 = max(0, int(cx - tw / 2))
+    y0 = max(0, int(cy - th / 2))
+    x1 = min(roi_w, x0 + tw)
+    y1 = min(h, y0 + th)
+
+    if x1 - x0 != tw or y1 - y0 != th:
+        return 0.0
+
+    patch = gray[y0:y1, x0:x1]
+
+    # ECC with EUCLIDEAN model (translation + rotation)
+    warp_matrix = np.eye(2, 3, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-4)
+
+    try:
+        _, warp_matrix = cv2.findTransformECC(
+            template.astype(np.float32),
+            patch.astype(np.float32),
+            warp_matrix,
+            cv2.MOTION_EUCLIDEAN,
+            criteria,
+        )
+        # Extract rotation angle from the 2×3 matrix
+        # For EUCLIDEAN: [[cos θ, -sin θ, tx], [sin θ, cos θ, ty]]
+        angle_rad = np.arctan2(warp_matrix[1, 0], warp_matrix[0, 0])
+        return float(np.degrees(angle_rad))
+    except cv2.error:
+        return 0.0
+
+
 def stabilize_folder(
     input_dir,
     output_dir,
@@ -675,6 +935,8 @@ def stabilize_folder(
     debug_dir=None,
     manual_anchor=None,
     border_mode="replicate",
+    rect_width=None,
+    rect_height=None,
 ):
     files = list_images(input_dir)
     if not files:
@@ -685,6 +947,7 @@ def stabilize_folder(
         os.makedirs(debug_dir, exist_ok=True)
 
     points = []
+    angles = []  # per-frame rotation angles (degrees)
     failures = 0
     total = len(files)
 
@@ -693,7 +956,46 @@ def stabilize_folder(
             log_cb(msg)
 
     log(f"Encontré {total} imágenes.")
-    log("Primera pasada: detectando perforación...")
+
+    # ── Phase 1: Bootstrap — build reference template from first detections ──
+    log("Fase 1: construyendo plantilla de referencia...")
+    bootstrap_limit = min(30, total)
+    bootstrap_frames = []  # (frame, anchor) pairs for template building
+    template = None
+
+    for i, f in enumerate(files[:bootstrap_limit], 1):
+        frame = cv2.imread(f)
+        if frame is None:
+            continue
+        pt = detect_perforation(
+            frame,
+            roi_ratio=roi_ratio,
+            threshold=threshold,
+            film_format=film_format,
+        )
+        if pt is not None and np.isfinite(pt[0]) and np.isfinite(pt[1]):
+            bootstrap_frames.append((frame, pt))
+            if len(bootstrap_frames) >= 15:
+                break
+
+    if bootstrap_frames:
+        template, _tpl_origin = _build_averaged_template(
+            bootstrap_frames, roi_ratio=roi_ratio, padding=25,
+            rect_width=rect_width, rect_height=rect_height,
+        )
+        if template is not None:
+            log(
+                f"Plantilla construida de {len(bootstrap_frames)} frames "
+                f"({template.shape[1]}×{template.shape[0]} px)"
+            )
+
+    if template is None:
+        log("No pude construir plantilla — usando detección por contorno.")
+
+    # ── Phase 2: Detect all frames via template matching (or contour fallback) ──
+    log("Fase 2: alineando frames...")
+    tm_count = 0
+    contour_count = 0
 
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
@@ -702,68 +1004,97 @@ def stabilize_folder(
             failures += 1
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
-            pt = detect_perforation(
-                frame,
-                roi_ratio=roi_ratio,
-                threshold=threshold,
-                film_format=film_format,
-                debug_dir=debug_dir,
-                frame_name=os.path.basename(f),
-            )
+            pt = None
+
+            angle = 0.0
+
+            # Try template matching first (primary)
+            if template is not None:
+                tm_result = _template_match_perforation(
+                    frame, template, roi_ratio=roi_ratio, min_confidence=0.4
+                )
+                if tm_result is not None:
+                    cx, cy, conf = tm_result
+                    pt = (cx, cy)
+                    tm_count += 1
+                    # Estimate rotation from the matched region
+                    angle = _estimate_rotation(
+                        frame, template, cx, cy, roi_ratio=roi_ratio
+                    )
+
+            # Fall back to contour detection
+            if pt is None:
+                pt = detect_perforation(
+                    frame,
+                    roi_ratio=roi_ratio,
+                    threshold=threshold,
+                    film_format=film_format,
+                    debug_dir=debug_dir,
+                    frame_name=os.path.basename(f),
+                )
+                if pt is not None:
+                    contour_count += 1
+
             points.append(pt)
+            angles.append(angle)
             if pt is None:
                 failures += 1
                 log(f"Sin detección: {os.path.basename(f)}")
         if progress_cb:
             progress_cb(i / (total * 2))
 
+    log(
+        f"Detección: {tm_count} template, {contour_count} contorno, "
+        f"{failures} fallidos de {total}"
+    )
+
     valid = [p for p in points if p is not None]
     if not valid:
         raise RuntimeError("No logré detectar la perforación en ningún frame.")
 
-    # Compute robust target: use manual anchor when provided, otherwise median of detections.
-    if manual_anchor is not None:
-        target_x = float(manual_anchor[0])
-        target_y = float(manual_anchor[1])
-        log(f"Usando referencia manual: x={target_x:.2f}, y={target_y:.2f}")
-    else:
-        # IQR outlier rejection: drop positions outside [Q1 - 1.5·IQR, Q3 + 1.5·IQR]
-        # before computing the median.  This removes residual wrong-perf detections
-        # (e.g. bottom-perf anchors that slipped past the position guard) without
-        # affecting batches where all anchors are tightly clustered.
-        ys_valid = np.array([p[1] for p in valid], dtype=np.float32)
-        q1, q3 = float(np.percentile(ys_valid, 25)), float(np.percentile(ys_valid, 75))
-        iqr = q3 - q1
-        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        inliers = [p for p in valid if lo <= p[1] <= hi]
-        if len(inliers) < len(valid):
-            log(
-                f"IQR: descartados {len(valid) - len(inliers)} anclas atípicas "
-                f"(fuera de [{lo:.0f}, {hi:.0f}] px)"
-            )
-        if inliers:
-            valid = inliers
-        xs_for_iqr = np.array([p[0] for p in valid], dtype=np.float32)
-        finite_cx = xs_for_iqr[np.isfinite(xs_for_iqr)]
-        if len(finite_cx) == 0:
-            raise RuntimeError("No se encontraron frames con detección de cx válida.")
-        q1x = float(np.percentile(finite_cx, 25))
-        q3x = float(np.percentile(finite_cx, 75))
-        iqrx = q3x - q1x
-        lox, hix = q1x - 1.5 * iqrx, q3x + 1.5 * iqrx
-        xs_for_target = np.where(
-            np.isfinite(xs_for_iqr) & ((xs_for_iqr < lox) | (xs_for_iqr > hix)),
-            np.nan,
-            xs_for_iqr,
+    # Compute robust target: median of all detected positions.
+    # Using the raw anchor as the target would push every frame by the full
+    # drift distance when the perforation is near an edge, causing cropping.
+    # The median minimises the maximum translation applied to any frame and is
+    # robust to outlier detections.
+
+    # IQR outlier rejection: drop positions outside [Q1 - 1.5·IQR, Q3 + 1.5·IQR]
+    # before computing the median.  This removes residual wrong-perf detections
+    # (e.g. bottom-perf anchors that slipped past the position guard) without
+    # affecting batches where all anchors are tightly clustered.
+    ys_valid = np.array([p[1] for p in valid], dtype=np.float32)
+    q1, q3 = float(np.percentile(ys_valid, 25)), float(np.percentile(ys_valid, 75))
+    iqr = q3 - q1
+    lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    inliers = [p for p in valid if lo <= p[1] <= hi]
+    if len(inliers) < len(valid):
+        log(
+            f"IQR: descartados {len(valid) - len(inliers)} anclas atípicas "
+            f"(fuera de [{lo:.0f}, {hi:.0f}] px)"
         )
-        x_rejected = int(np.sum(np.isfinite(xs_for_iqr) & ~np.isfinite(xs_for_target)))
-        if x_rejected > 0:
-            log(
-                f"IQR X: descartados {x_rejected} anclas atípicas "
-                f"(fuera de [{lox:.0f}, {hix:.0f}] px)"
-            )
-        target_x = float(np.nanmedian(xs_for_target))
-        target_y = float(np.median([p[1] for p in valid]))
+    if inliers:
+        valid = inliers
+    xs_for_iqr = np.array([p[0] for p in valid], dtype=np.float32)
+    finite_cx = xs_for_iqr[np.isfinite(xs_for_iqr)]
+    if len(finite_cx) == 0:
+        raise RuntimeError("No se encontraron frames con detección de cx válida.")
+    q1x = float(np.percentile(finite_cx, 25))
+    q3x = float(np.percentile(finite_cx, 75))
+    iqrx = q3x - q1x
+    lox, hix = q1x - 1.5 * iqrx, q3x + 1.5 * iqrx
+    xs_for_target = np.where(
+        np.isfinite(xs_for_iqr) & ((xs_for_iqr < lox) | (xs_for_iqr > hix)),
+        np.nan,
+        xs_for_iqr,
+    )
+    x_rejected = int(np.sum(np.isfinite(xs_for_iqr) & ~np.isfinite(xs_for_target)))
+    if x_rejected > 0:
+        log(
+            f"IQR X: descartados {x_rejected} anclas atípicas "
+            f"(fuera de [{lox:.0f}, {hix:.0f}] px)"
+        )
+    target_x = float(np.nanmedian(xs_for_target))
+    target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
 
     # Fill None positions (failed detections) by linear interpolation.
@@ -799,8 +1130,21 @@ def stabilize_folder(
             pt = per_frame[i - 1]
             dx = target_x - pt[0]
             dy = target_y - pt[1]
+            angle = angles[i - 1] if i - 1 < len(angles) else 0.0
 
-            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            # Build rotation + translation matrix.
+            # Rotate around the detected perforation position to correct
+            # in-gate tilt, then translate to align to the target.
+            if abs(angle) > 0.001:
+                # Rotate around the perforation's position in the frame
+                perf_x, perf_y = pt[0], pt[1]
+                R = cv2.getRotationMatrix2D((perf_x, perf_y), -angle, 1.0)
+                # Add translation to the rotation matrix
+                R[0, 2] += dx
+                R[1, 2] += dy
+                M = R
+            else:
+                M = np.float32([[1, 0, dx], [0, 1, dy]])
             stabilized = cv2.warpAffine(
                 frame,
                 M,
