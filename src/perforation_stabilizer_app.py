@@ -716,6 +716,8 @@ def _build_perforation_template(frame, anchor, roi_ratio=0.22, padding=20):
     gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
 
     cx, cy = anchor
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return None, None
     # Estimate perforation size from ROI dimensions (typically ~8-15% of ROI width)
     est_perf_w = int(roi_w * 0.35)
     est_perf_h = int(h * 0.08)
@@ -942,7 +944,7 @@ def stabilize_folder(
             threshold=threshold,
             film_format=film_format,
         )
-        if pt is not None:
+        if pt is not None and np.isfinite(pt[0]) and np.isfinite(pt[1]):
             bootstrap_frames.append((frame, pt))
             if len(bootstrap_frames) >= 15:
                 break
