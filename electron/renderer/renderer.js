@@ -23,8 +23,7 @@ const previewSection    = document.getElementById('previewSection');
 const previewStatusEl   = document.getElementById('previewStatus');
 const previewImg        = document.getElementById('previewImg');
 const anchorDot         = document.getElementById('anchorDot');
-const previewRefreshBtn = document.getElementById('previewRefreshBtn');
-const previewResetBtn   = document.getElementById('previewResetBtn');
+const selectionRect     = document.getElementById('selectionRect');
 
 // ── Version badge ─────────────────────────────────────────────────────────────
 const versionBadge = document.getElementById('appVersion');
@@ -57,9 +56,16 @@ window.api.onUpdateNotFound(() => {
 });
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let isRunning          = false;
-let previewAnchor      = null;   // null | { x, y } in frame coords (manual override)
-let autoDetectedAnchor = null;   // null | { x, y } from last Python detection
+let isRunning     = false;
+let previewAnchor = null;   // null | { x, y } in frame coords
+let previewRect   = null;   // null | { width, height } in frame coords
+let isDragging    = false;
+let dragStart     = null;   // { displayX, displayY, frameX, frameY }
+
+let zoomLevel = 1;
+const ZOOM_MIN  = 1;
+const ZOOM_MAX  = 5;
+const ZOOM_STEP = 0.25;
 
 // ── Prevent Electron from navigating when files land outside the drop zone ────
 document.addEventListener('dragover', (e) => e.preventDefault());
@@ -155,28 +161,39 @@ function setInputFolder(folderPath) {
   dropContent.hidden = true;
   dropLoaded.hidden  = false;
 
-  runBtn.disabled = false;
-  runBtn.removeAttribute('aria-disabled');
-
   addLog(`Carpeta seleccionada: ${folderPath}`);
   triggerPreview();
 }
 
 // ── Preview panel ─────────────────────────────────────────────────────────────
 
+function updateRunButton() {
+  const hasInput  = inputPathEl.value.trim() !== '';
+  const hasAnchor = previewAnchor !== null;
+  runBtn.disabled = !hasInput || !hasAnchor;
+  if (runBtn.disabled) {
+    runBtn.setAttribute('aria-disabled', 'true');
+  } else {
+    runBtn.removeAttribute('aria-disabled');
+  }
+}
+
 async function triggerPreview() {
   const input = inputPathEl.value.trim();
   if (!input) return;
 
-  // Reset anchor state immediately so a stale anchor from a previous folder
-  // is never used if the user hits run during the async "Analizando…" window.
-  previewAnchor      = null;
-  autoDetectedAnchor = null;
+  previewAnchor = null;
+  previewRect   = null;
+  zoomLevel = 1;
+  previewImg.style.transform = '';
+  previewImg.style.width     = '';
+  previewImg.style.height    = '';
+  updateRunButton();
 
   previewSection.hidden = false;
-  previewStatusEl.textContent = 'Analizando…';
+  previewStatusEl.textContent = 'Cargando…';
   anchorDot.hidden = true;
-  previewResetBtn.hidden = true;
+  selectionRect.hidden = true;
 
   const firstFrame = await window.api.listFirstFrame(input);
   if (!firstFrame) {
@@ -184,83 +201,108 @@ async function triggerPreview() {
     return;
   }
 
-  let result;
-  try {
-    result = await window.api.previewFrame({
-      framePath:  firstFrame,
-      roi:        parseFloat(document.getElementById('paramRoi').value)        || 0.22,
-      threshold:  parseInt(document.getElementById('paramThreshold').value, 10) || 210,
-      filmFormat: filmFormatEl.value || 'super8',
-    });
-  } catch {
-    previewStatusEl.textContent = 'Error al analizar el frame';
+  previewImg.src = 'file://' + firstFrame + '?t=' + Date.now();
+  previewImg.onload = () => {
+    previewStatusEl.textContent = 'Haz clic y arrastra para seleccionar el área de referencia';
+  };
+  previewImg.onerror = () => {
+    previewStatusEl.textContent = 'Error al cargar el frame';
+  };
+}
+
+// ── Preview zoom ──────────────────────────────────────────────────────────────
+
+const previewImgWrap = document.getElementById('previewImgWrap');
+previewImgWrap.addEventListener('wheel', (e) => {
+  if (!previewImg.naturalWidth) return;
+  e.preventDefault();
+  const oldZoom = zoomLevel;
+  zoomLevel = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomLevel + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP)));
+  if (zoomLevel !== oldZoom) {
+    previewImg.style.transform = `scale(${zoomLevel})`;
+    previewImg.style.width  = previewImg.naturalWidth  + 'px';
+    previewImg.style.height = previewImg.naturalHeight + 'px';
+  }
+}, { passive: false });
+
+// ── Rectangle selection ───────────────────────────────────────────────────────
+
+function eventToFrameCoords(e) {
+  const rect     = previewImg.getBoundingClientRect();
+  const displayX = e.clientX - rect.left;
+  const displayY = e.clientY - rect.top;
+  const frameX   = (displayX / zoomLevel) * (previewImg.naturalWidth  / (previewImg.offsetWidth  / zoomLevel));
+  const frameY   = (displayY / zoomLevel) * (previewImg.naturalHeight / (previewImg.offsetHeight / zoomLevel));
+  return { displayX, displayY, frameX, frameY };
+}
+
+previewImg.addEventListener('mousedown', (e) => {
+  if (!previewImg.naturalWidth || e.button !== 0) return;
+  e.preventDefault();
+
+  const coords = eventToFrameCoords(e);
+  isDragging = true;
+  dragStart  = coords;
+  previewRect = null;
+
+  anchorDot.style.left = coords.displayX + 'px';
+  anchorDot.style.top  = coords.displayY + 'px';
+  anchorDot.hidden = false;
+
+  selectionRect.hidden = true;
+  selectionRect.style.left   = coords.displayX + 'px';
+  selectionRect.style.top    = coords.displayY + 'px';
+  selectionRect.style.width  = '0px';
+  selectionRect.style.height = '0px';
+
+  previewStatusEl.textContent = `Ancla: (${Math.round(coords.frameX)}, ${Math.round(coords.frameY)}) — arrastra para definir área`;
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!isDragging || !dragStart) return;
+
+  const rect     = previewImg.getBoundingClientRect();
+  const displayX = e.clientX - rect.left;
+  const displayY = e.clientY - rect.top;
+
+  const left   = Math.min(dragStart.displayX, displayX);
+  const top    = Math.min(dragStart.displayY, displayY);
+  const width  = Math.abs(displayX - dragStart.displayX);
+  const height = Math.abs(displayY - dragStart.displayY);
+
+  selectionRect.style.left   = left   + 'px';
+  selectionRect.style.top    = top    + 'px';
+  selectionRect.style.width  = width  + 'px';
+  selectionRect.style.height = height + 'px';
+  selectionRect.hidden = false;
+});
+
+document.addEventListener('mouseup', (e) => {
+  if (!isDragging || !dragStart) return;
+  isDragging = false;
+
+  const coords = eventToFrameCoords(e);
+
+  const rectWidth  = Math.abs(coords.frameX - dragStart.frameX);
+  const rectHeight = Math.abs(coords.frameY - dragStart.frameY);
+
+  const anchorX = Math.min(dragStart.frameX, coords.frameX);
+  const anchorY = Math.min(dragStart.frameY, coords.frameY);
+
+  if (rectWidth < 20 || rectHeight < 20) {
+    previewAnchor = { x: dragStart.frameX, y: dragStart.frameY };
+    previewRect   = null;
+    selectionRect.hidden = true;
+    previewStatusEl.textContent = `Ancla: (${Math.round(dragStart.frameX)}, ${Math.round(dragStart.frameY)}) — arrastra para definir área`;
+    updateRunButton();
     return;
   }
 
-  if (result.previewPath) {
-    // Cache-bust so Electron reloads even when path is reused across calls
-    previewImg.src = 'file://' + result.previewPath + '?t=' + Date.now();
-  }
+  previewAnchor = { x: anchorX, y: anchorY };
+  previewRect   = { width: rectWidth, height: rectHeight };
 
-  if (result.detected) {
-    autoDetectedAnchor = { x: result.cx, y: result.cy };
-    previewAnchor      = autoDetectedAnchor;
-    previewStatusEl.textContent =
-      `Auto: (${Math.round(result.cx)}, ${Math.round(result.cy)})`;
-  } else {
-    autoDetectedAnchor = null;
-    previewAnchor      = null;
-    previewStatusEl.textContent = 'No detectado — haz clic para marcar manualmente';
-  }
-}
-
-// Re-detect when film format changes (different format → different detection params)
-filmFormatEl.addEventListener('change', () => {
-  previewAnchor = null;
-  triggerPreview();
-});
-
-// Actualizar: re-run preview with current advanced params
-previewRefreshBtn.addEventListener('click', () => {
-  previewAnchor = null;
-  triggerPreview();
-});
-
-// Restablecer: revert manual override to last auto-detected anchor
-previewResetBtn.addEventListener('click', () => {
-  previewAnchor  = autoDetectedAnchor;
-  anchorDot.hidden = true;
-  previewResetBtn.hidden = true;
-  previewStatusEl.textContent = autoDetectedAnchor
-    ? `Auto: (${Math.round(autoDetectedAnchor.x)}, ${Math.round(autoDetectedAnchor.y)})`
-    : 'No detectado — haz clic para marcar manualmente';
-});
-
-// Click-to-set-anchor: map click position back to frame coordinates
-previewImg.addEventListener('click', (e) => {
-  if (!previewImg.naturalWidth) return;  // image not yet loaded
-  const scaleX = previewImg.naturalWidth  / previewImg.offsetWidth;
-  const scaleY = previewImg.naturalHeight / previewImg.offsetHeight;
-  const frameX = e.offsetX * scaleX;
-  const frameY = e.offsetY * scaleY;
-
-  previewAnchor = { x: frameX, y: frameY };
-
-  // ROI boundary: preview shows 40% of frame, ROI is roi_ratio of frame
-  // roiBoundaryX = previewWidth * (roi_ratio / 0.40)
-  const roiRatio = parseFloat(document.getElementById('paramRoi').value) || 0.22;
-  const roiBoundaryX = previewImg.naturalWidth * (roiRatio / 0.40);
-  const isOutsideRoi = frameX > roiBoundaryX;
-
-  anchorDot.style.left = e.offsetX + 'px';
-  anchorDot.style.top  = e.offsetY + 'px';
-  anchorDot.classList.toggle('is-outside-roi', isOutsideRoi);
-  anchorDot.hidden = false;
-
-  previewStatusEl.textContent = isOutsideRoi
-    ? `Manual: (${Math.round(frameX)}, ${Math.round(frameY)}) — fuera de zona de detección`
-    : `Manual: (${Math.round(frameX)}, ${Math.round(frameY)})`;
-  previewResetBtn.hidden = autoDetectedAnchor === null;
+  previewStatusEl.textContent = `Ancla: (${Math.round(anchorX)}, ${Math.round(anchorY)}) · Área: ${Math.round(rectWidth)}×${Math.round(rectHeight)} px`;
+  updateRunButton();
 });
 
 // ── Run / Cancel ──────────────────────────────────────────────────────────────
@@ -295,6 +337,8 @@ function startProcess() {
     manualAnchorX: previewAnchor?.x ?? null,
     manualAnchorY: previewAnchor?.y ?? null,
     borderMode:    document.getElementById('paramBorderMode').value || 'replicate',
+    rectWidth:     previewRect?.width  ?? null,
+    rectHeight:    previewRect?.height ?? null,
   });
 }
 

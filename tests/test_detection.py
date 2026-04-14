@@ -466,6 +466,64 @@ class TestTemplateMatching:
             out_images = [f for f in os.listdir(out) if f.endswith(".jpg")]
             assert len(out_images) == 5
 
+    def test_build_template_with_rect_dimensions(self):
+        """When rect_width/rect_height are provided, template uses those dimensions."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        rw, rh = 80, 60
+        tpl, origin = _build_perforation_template(
+            frame, pt, rect_width=rw, rect_height=rh,
+        )
+        assert tpl is not None
+        assert tpl.shape == (rh, rw)
+
+    def test_build_template_rect_clamps_to_frame_bounds(self):
+        """rect_width/rect_height exceeding frame bounds are clamped."""
+        frame = make_frame([0.25])
+        # Anchor near top-left corner with oversized rect
+        anchor = (5.0, 5.0)
+        tpl, origin = _build_perforation_template(
+            frame, anchor, rect_width=9999, rect_height=9999,
+        )
+        assert tpl is not None
+        h, w = frame.shape[:2]
+        roi_w = _roi_w(w)
+        # Template should be clamped to ROI width and frame height
+        assert tpl.shape[1] <= roi_w
+        assert tpl.shape[0] <= h
+
+    def test_stabilize_folder_median_target(self):
+        """Target position is the median of detections, not the raw anchor."""
+        with tempfile.TemporaryDirectory() as inp, \
+             tempfile.TemporaryDirectory() as out:
+
+            # Create frames with perforations at different y positions
+            y_fracs = [0.24, 0.25, 0.26]
+            for i, yf in enumerate(y_fracs):
+                _write_frame(
+                    os.path.join(inp, f"frame_{i:03d}.jpg"),
+                    make_frame([yf]),
+                )
+
+            logs = []
+            stabilize_folder(
+                inp, out, film_format="super8", jpeg_quality=95,
+                log_cb=lambda m: logs.append(m),
+            )
+
+            # Find the target log line
+            target_log = [l for l in logs if "Punto fijo objetivo" in l]
+            assert len(target_log) == 1
+            # The target y should be near the median (0.25 * 1000 = 250)
+            # not the first frame's position
+            import re
+            m = re.search(r"y=(\d+\.\d+)", target_log[0])
+            assert m is not None
+            target_y = float(m.group(1))
+            median_y = FRAME_H * 0.25  # middle frame's y
+            assert abs(target_y - median_y) < 15
+
 
 # ── Unit 5: Rotation estimation ──────────────────────────────────────────────
 

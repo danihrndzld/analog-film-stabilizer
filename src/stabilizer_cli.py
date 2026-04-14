@@ -3,93 +3,31 @@
 CLI backend for the Electron UI.
 Streams JSON-lines to stdout so Electron can consume progress and logs.
 
-Modes:
-  batch (default)
-    --input DIR --output DIR [--roi F] [--threshold N] [--smooth N]
-    [--quality N] [--film-format super8|8mm|super16] [--debug-frames DIR]
-    [--manual-anchor-x N --manual-anchor-y N]
-
-  preview
-    --frame-path FILE --preview-out FILE [--roi F] [--threshold N]
-    [--film-format super8|8mm|super16]
+Batch mode (default):
+  --input DIR --output DIR [--roi F] [--threshold N] [--smooth N]
+  [--quality N] [--film-format super8|8mm|super16] [--debug-frames DIR]
+  [--manual-anchor-x N --manual-anchor-y N]
+  [--rect-width N --rect-height N]
 
 Output lines (one per line, each valid JSON):
-  Batch mode:
-    {"type": "progress", "value": 0.0..1.0}
-    {"type": "log",      "msg":  "..."}
-    {"type": "done",     "summary": {...}}
-    {"type": "error",    "msg":  "..."}
-
-  Preview mode (single line):
-    {"type": "preview", "detected": true|false,
-     "cx": N|null, "cy": N|null, "previewPath": "..."|null}
+  {"type": "progress", "value": 0.0..1.0}
+  {"type": "log",      "msg":  "..."}
+  {"type": "done",     "summary": {...}}
+  {"type": "error",    "msg":  "..."}
 """
 
 import argparse
 import json
-import math
 import os
 import sys
 
-import cv2
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from perforation_stabilizer_app import (
-    _annotate_roi_preview,
-    detect_perforation,
-    stabilize_folder,
-)
+from perforation_stabilizer_app import stabilize_folder
 
 
 def emit(obj):
     print(json.dumps(obj, ensure_ascii=False), flush=True)
-
-
-def run_preview(args):
-    """Run single-frame detection and save an annotated preview JPEG."""
-    frame = cv2.imread(args.frame_path)
-    if frame is None:
-        emit(
-            {
-                "type": "preview",
-                "detected": False,
-                "cx": None,
-                "cy": None,
-                "previewPath": None,
-            }
-        )
-        return
-
-    h, w = frame.shape[:2]
-    roi_w = max(50, int(w * args.roi))
-    # Preview shows 40% of frame width for context; detection still uses roi_w
-    preview_w = max(roi_w, int(w * 0.40))
-    preview_bgr = frame[:, :preview_w]
-    frame_name = os.path.basename(args.frame_path)
-
-    anchor = detect_perforation(frame, roi_ratio=args.roi, film_format=args.film_format)
-
-    # Annotate the preview crop; pass roi_w for the boundary indicator
-    annotated = _annotate_roi_preview(
-        preview_bgr, anchor, rejections=[], frame_name=frame_name,
-        roi_boundary_x=roi_w
-    )
-    cv2.imwrite(args.preview_out, annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-
-    emit(
-        {
-            "type": "preview",
-            "detected": anchor is not None,
-            "cx": float(anchor[0])
-            if anchor is not None and math.isfinite(anchor[0])
-            else None,
-            "cy": float(anchor[1])
-            if anchor is not None and math.isfinite(anchor[1])
-            else None,
-            "previewPath": args.preview_out,
-        }
-    )
 
 
 def run_batch(args):
@@ -112,6 +50,8 @@ def run_batch(args):
             debug_dir=args.debug_frames,
             manual_anchor=manual_anchor,
             border_mode=args.border_mode,
+            rect_width=args.rect_width,
+            rect_height=args.rect_height,
         )
         emit({"type": "done", "summary": summary})
     except Exception as exc:
@@ -122,15 +62,7 @@ def run_batch(args):
 def main():
     parser = argparse.ArgumentParser(description="Perforation stabilizer CLI")
 
-    # ── Mode ──────────────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--mode",
-        choices=["batch", "preview"],
-        default="batch",
-        help="Operation mode: batch (default) or preview",
-    )
-
-    # ── Shared params (both modes) ────────────────────────────────────────────
+    # ── Shared params ─────────────────────────────────────────────────────────
     parser.add_argument(
         "--roi", type=float, default=0.22, help="ROI fraction (default 0.22)"
     )
@@ -177,37 +109,30 @@ def main():
         default="replicate",
         help="Border fill mode for warpAffine (default: replicate)",
     )
-
-    # ── Preview-mode params ───────────────────────────────────────────────────
     parser.add_argument(
-        "--frame-path", default=None, help="Path to single frame for preview mode"
+        "--rect-width",
+        type=float,
+        default=None,
+        help="Template rectangle width in pixels",
     )
     parser.add_argument(
-        "--preview-out", default=None, help="Output path for annotated preview JPEG"
+        "--rect-height",
+        type=float,
+        default=None,
+        help="Template rectangle height in pixels",
     )
 
     args = parser.parse_args()
 
-    if args.mode == "preview":
-        if not args.frame_path or not args.preview_out:
-            emit(
-                {
-                    "type": "error",
-                    "msg": "--frame-path and --preview-out are required in preview mode",
-                }
-            )
-            sys.exit(1)
-        run_preview(args)
-    else:
-        if not args.input or not args.output:
-            emit(
-                {
-                    "type": "error",
-                    "msg": "--input and --output are required in batch mode",
-                }
-            )
-            sys.exit(1)
-        run_batch(args)
+    if not args.input or not args.output:
+        emit(
+            {
+                "type": "error",
+                "msg": "--input and --output are required",
+            }
+        )
+        sys.exit(1)
+    run_batch(args)
 
 
 if __name__ == "__main__":

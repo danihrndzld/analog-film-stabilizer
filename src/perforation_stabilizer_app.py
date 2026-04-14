@@ -690,7 +690,10 @@ _BORDER_MODES = {
 # ── Template matching alignment ──────────────────────────────────────────────
 
 
-def _build_perforation_template(frame, anchor, roi_ratio=0.22, padding=20):
+def _build_perforation_template(
+    frame, anchor, roi_ratio=0.22, padding=20,
+    rect_width=None, rect_height=None,
+):
     """Extract a grayscale patch around the detected perforation for template matching.
 
     Parameters
@@ -703,6 +706,10 @@ def _build_perforation_template(frame, anchor, roi_ratio=0.22, padding=20):
         Fraction of frame width used as ROI.
     padding : int
         Extra pixels around the perforation bounding region.
+    rect_width : float or None
+        User-defined template width in pixels (overrides auto-estimate).
+    rect_height : float or None
+        User-defined template height in pixels (overrides auto-estimate).
 
     Returns
     -------
@@ -718,14 +725,21 @@ def _build_perforation_template(frame, anchor, roi_ratio=0.22, padding=20):
     cx, cy = anchor
     if not (np.isfinite(cx) and np.isfinite(cy)):
         return None, None
-    # Estimate perforation size from ROI dimensions (typically ~8-15% of ROI width)
-    est_perf_w = int(roi_w * 0.35)
-    est_perf_h = int(h * 0.08)
 
-    x0 = max(0, int(cx - est_perf_w // 2 - padding))
-    y0 = max(0, int(cy - est_perf_h // 2 - padding))
-    x1 = min(roi_w, int(cx + est_perf_w // 2 + padding))
-    y1 = min(h, int(cy + est_perf_h // 2 + padding))
+    if rect_width is not None and rect_height is not None:
+        # User-defined rectangle: anchor is top-left corner
+        x0 = max(0, int(cx))
+        y0 = max(0, int(cy))
+        x1 = min(roi_w, int(cx + rect_width))
+        y1 = min(h, int(cy + rect_height))
+    else:
+        # Estimate perforation size from ROI dimensions (typically ~8-15% of ROI width)
+        est_perf_w = int(roi_w * 0.35)
+        est_perf_h = int(h * 0.08)
+        x0 = max(0, int(cx - est_perf_w // 2 - padding))
+        y0 = max(0, int(cy - est_perf_h // 2 - padding))
+        x1 = min(roi_w, int(cx + est_perf_w // 2 + padding))
+        y1 = min(h, int(cy + est_perf_h // 2 + padding))
 
     if x1 - x0 < 10 or y1 - y0 < 10:
         return None, None
@@ -734,7 +748,10 @@ def _build_perforation_template(frame, anchor, roi_ratio=0.22, padding=20):
     return template, (x0, y0)
 
 
-def _build_averaged_template(frames_and_anchors, roi_ratio=0.22, padding=20):
+def _build_averaged_template(
+    frames_and_anchors, roi_ratio=0.22, padding=20,
+    rect_width=None, rect_height=None,
+):
     """Build a noise-reduced template by averaging patches from multiple frames.
 
     Parameters
@@ -745,6 +762,10 @@ def _build_averaged_template(frames_and_anchors, roi_ratio=0.22, padding=20):
         Fraction of frame width used as ROI.
     padding : int
         Extra pixels around the perforation.
+    rect_width : float or None
+        User-defined template width in pixels.
+    rect_height : float or None
+        User-defined template height in pixels.
 
     Returns
     -------
@@ -753,7 +774,10 @@ def _build_averaged_template(frames_and_anchors, roi_ratio=0.22, padding=20):
     patches = []
     origin = None
     for frame, anchor in frames_and_anchors:
-        tpl, orig = _build_perforation_template(frame, anchor, roi_ratio, padding)
+        tpl, orig = _build_perforation_template(
+            frame, anchor, roi_ratio, padding,
+            rect_width=rect_width, rect_height=rect_height,
+        )
         if tpl is not None:
             if origin is None:
                 origin = orig
@@ -908,6 +932,8 @@ def stabilize_folder(
     debug_dir=None,
     manual_anchor=None,
     border_mode="replicate",
+    rect_width=None,
+    rect_height=None,
 ):
     files = list_images(input_dir)
     if not files:
@@ -951,7 +977,8 @@ def stabilize_folder(
 
     if bootstrap_frames:
         template, _tpl_origin = _build_averaged_template(
-            bootstrap_frames, roi_ratio=roi_ratio, padding=25
+            bootstrap_frames, roi_ratio=roi_ratio, padding=25,
+            rect_width=rect_width, rect_height=rect_height,
         )
         if template is not None:
             log(
@@ -1022,49 +1049,49 @@ def stabilize_folder(
     if not valid:
         raise RuntimeError("No logré detectar la perforación en ningún frame.")
 
-    # Compute robust target: use manual anchor when provided, otherwise median of detections.
-    if manual_anchor is not None:
-        target_x = float(manual_anchor[0])
-        target_y = float(manual_anchor[1])
-        log(f"Usando referencia manual: x={target_x:.2f}, y={target_y:.2f}")
-    else:
-        # IQR outlier rejection: drop positions outside [Q1 - 1.5·IQR, Q3 + 1.5·IQR]
-        # before computing the median.  This removes residual wrong-perf detections
-        # (e.g. bottom-perf anchors that slipped past the position guard) without
-        # affecting batches where all anchors are tightly clustered.
-        ys_valid = np.array([p[1] for p in valid], dtype=np.float32)
-        q1, q3 = float(np.percentile(ys_valid, 25)), float(np.percentile(ys_valid, 75))
-        iqr = q3 - q1
-        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        inliers = [p for p in valid if lo <= p[1] <= hi]
-        if len(inliers) < len(valid):
-            log(
-                f"IQR: descartados {len(valid) - len(inliers)} anclas atípicas "
-                f"(fuera de [{lo:.0f}, {hi:.0f}] px)"
-            )
-        if inliers:
-            valid = inliers
-        xs_for_iqr = np.array([p[0] for p in valid], dtype=np.float32)
-        finite_cx = xs_for_iqr[np.isfinite(xs_for_iqr)]
-        if len(finite_cx) == 0:
-            raise RuntimeError("No se encontraron frames con detección de cx válida.")
-        q1x = float(np.percentile(finite_cx, 25))
-        q3x = float(np.percentile(finite_cx, 75))
-        iqrx = q3x - q1x
-        lox, hix = q1x - 1.5 * iqrx, q3x + 1.5 * iqrx
-        xs_for_target = np.where(
-            np.isfinite(xs_for_iqr) & ((xs_for_iqr < lox) | (xs_for_iqr > hix)),
-            np.nan,
-            xs_for_iqr,
+    # Compute robust target: median of all detected positions.
+    # Using the raw anchor as the target would push every frame by the full
+    # drift distance when the perforation is near an edge, causing cropping.
+    # The median minimises the maximum translation applied to any frame and is
+    # robust to outlier detections.
+
+    # IQR outlier rejection: drop positions outside [Q1 - 1.5·IQR, Q3 + 1.5·IQR]
+    # before computing the median.  This removes residual wrong-perf detections
+    # (e.g. bottom-perf anchors that slipped past the position guard) without
+    # affecting batches where all anchors are tightly clustered.
+    ys_valid = np.array([p[1] for p in valid], dtype=np.float32)
+    q1, q3 = float(np.percentile(ys_valid, 25)), float(np.percentile(ys_valid, 75))
+    iqr = q3 - q1
+    lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    inliers = [p for p in valid if lo <= p[1] <= hi]
+    if len(inliers) < len(valid):
+        log(
+            f"IQR: descartados {len(valid) - len(inliers)} anclas atípicas "
+            f"(fuera de [{lo:.0f}, {hi:.0f}] px)"
         )
-        x_rejected = int(np.sum(np.isfinite(xs_for_iqr) & ~np.isfinite(xs_for_target)))
-        if x_rejected > 0:
-            log(
-                f"IQR X: descartados {x_rejected} anclas atípicas "
-                f"(fuera de [{lox:.0f}, {hix:.0f}] px)"
-            )
-        target_x = float(np.nanmedian(xs_for_target))
-        target_y = float(np.median([p[1] for p in valid]))
+    if inliers:
+        valid = inliers
+    xs_for_iqr = np.array([p[0] for p in valid], dtype=np.float32)
+    finite_cx = xs_for_iqr[np.isfinite(xs_for_iqr)]
+    if len(finite_cx) == 0:
+        raise RuntimeError("No se encontraron frames con detección de cx válida.")
+    q1x = float(np.percentile(finite_cx, 25))
+    q3x = float(np.percentile(finite_cx, 75))
+    iqrx = q3x - q1x
+    lox, hix = q1x - 1.5 * iqrx, q3x + 1.5 * iqrx
+    xs_for_target = np.where(
+        np.isfinite(xs_for_iqr) & ((xs_for_iqr < lox) | (xs_for_iqr > hix)),
+        np.nan,
+        xs_for_iqr,
+    )
+    x_rejected = int(np.sum(np.isfinite(xs_for_iqr) & ~np.isfinite(xs_for_target)))
+    if x_rejected > 0:
+        log(
+            f"IQR X: descartados {x_rejected} anclas atípicas "
+            f"(fuera de [{lox:.0f}, {hix:.0f}] px)"
+        )
+    target_x = float(np.nanmedian(xs_for_target))
+    target_y = float(np.median([p[1] for p in valid]))
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
 
     # Fill None positions (failed detections) by linear interpolation.
