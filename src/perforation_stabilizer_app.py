@@ -727,6 +727,9 @@ def _build_perforation_template(
         return None, None
 
     if rect_width is not None and rect_height is not None:
+        if not (np.isfinite(rect_width) and np.isfinite(rect_height)
+                and rect_width > 0 and rect_height > 0):
+            return None, None
         # User-defined rectangle: anchor is top-left corner
         x0 = max(0, int(cx))
         y0 = max(0, int(cy))

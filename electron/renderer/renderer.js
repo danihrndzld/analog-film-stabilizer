@@ -231,8 +231,10 @@ function eventToFrameCoords(e) {
   const rect     = previewImg.getBoundingClientRect();
   const displayX = e.clientX - rect.left;
   const displayY = e.clientY - rect.top;
-  const frameX   = (displayX / zoomLevel) * (previewImg.naturalWidth  / (previewImg.offsetWidth  / zoomLevel));
-  const frameY   = (displayY / zoomLevel) * (previewImg.naturalHeight / (previewImg.offsetHeight / zoomLevel));
+  // getBoundingClientRect returns scaled dimensions, so divide by zoom
+  // to get CSS-pixel position, then map to natural image coordinates
+  const frameX   = (displayX / zoomLevel) * (previewImg.naturalWidth  / previewImg.offsetWidth);
+  const frameY   = (displayY / zoomLevel) * (previewImg.naturalHeight / previewImg.offsetHeight);
   return { displayX, displayY, frameX, frameY };
 }
 
@@ -283,11 +285,21 @@ document.addEventListener('mouseup', (e) => {
 
   const coords = eventToFrameCoords(e);
 
-  const rectWidth  = Math.abs(coords.frameX - dragStart.frameX);
-  const rectHeight = Math.abs(coords.frameY - dragStart.frameY);
+  const natW = previewImg.naturalWidth;
+  const natH = previewImg.naturalHeight;
 
-  const anchorX = Math.min(dragStart.frameX, coords.frameX);
-  const anchorY = Math.min(dragStart.frameY, coords.frameY);
+  // Clamp frame coordinates to image bounds
+  const clamp = (v, max) => Math.max(0, Math.min(v, max));
+  const x0 = clamp(Math.min(dragStart.frameX, coords.frameX), natW);
+  const y0 = clamp(Math.min(dragStart.frameY, coords.frameY), natH);
+  const x1 = clamp(Math.max(dragStart.frameX, coords.frameX), natW);
+  const y1 = clamp(Math.max(dragStart.frameY, coords.frameY), natH);
+
+  const rectWidth  = x1 - x0;
+  const rectHeight = y1 - y0;
+
+  const anchorX = x0;
+  const anchorY = y0;
 
   if (rectWidth < 20 || rectHeight < 20) {
     previewAnchor = { x: dragStart.frameX, y: dragStart.frameY };
