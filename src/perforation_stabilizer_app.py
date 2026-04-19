@@ -81,9 +81,7 @@ def _detect_perf_bbox(frame, anchor, search_radius=None):
 
     _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    contours, _ = cv2.findContours(
-        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
@@ -432,9 +430,7 @@ def _rank_candidates(
         else:
             score_close = False
         sep = ((top[0] - runner[0]) ** 2 + (top[1] - runner[1]) ** 2) ** 0.5
-        spacing_close = (
-            abs(sep - perf_spacing) <= ambiguity_spacing_tol * perf_spacing
-        )
+        spacing_close = abs(sep - perf_spacing) <= ambiguity_spacing_tol * perf_spacing
         if score_close and spacing_close:
             ambiguous = True
 
@@ -471,9 +467,7 @@ def _detect_perf_spacing(frame, anchor, search_radius=None):
         return None
 
     _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(
-        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
@@ -614,10 +608,7 @@ def _build_rotation_template(frame, anchor, half_w=None, half_h=None):
     if not (np.isfinite(cx) and np.isfinite(cy)):
         return None
 
-    if half_h is None:
-        half_h = int(min(1000, max(150, h * 0.3)))
-    else:
-        half_h = int(half_h)
+    half_h = int(min(1000, max(150, h * 0.3))) if half_h is None else int(half_h)
 
     if half_w is None:
         bbox = _detect_perf_bbox(frame, anchor)
@@ -783,14 +774,24 @@ def stabilize_folder(
     # ── Phase 2: Detect anchor position in all frames via template matching ──
     log("Fase 2: alineando frames...")
 
-    # Tracking state: seed search at the user anchor; update as we find matches.
-    # ROI search keeps NCC from locking onto an adjacent perforation. The
-    # motion-prior threshold rejects implausible jumps (also typically a
-    # neighbouring perf) and forces the position through the interpolation
-    # fallback.
-    search_radius = 220  # px; covers realistic frame-to-frame drift
-    max_jump = 180  # px; above this, treat match as neighbouring perf
-    last_pos = (float(anchor[0]), float(anchor[1]))
+    # Detect inter-perforation spacing from first frame — used to calibrate
+    # the search radius and to feed the ranking / ambiguity detector.
+    perf_spacing = _detect_perf_spacing(first_frame, anchor)
+    if perf_spacing is None:
+        # Fallback: use frame-height heuristic (Regular 8mm has ~1 perf per frame)
+        perf_spacing = float(first_frame.shape[0]) * 0.5
+        log(
+            f"No detecté espaciado entre perfs; usando heurística {perf_spacing:.0f}px."
+        )
+    else:
+        log(f"Espaciado entre perforaciones detectado: {perf_spacing:.0f}px.")
+
+    # Search radius: generous enough to find the perf even after real jitter,
+    # but < perf_spacing so NCC cannot reach the neighbouring perforation.
+    search_radius = int(max(120, min(perf_spacing * 0.45, perf_spacing - 40)))
+    predictor = _MotionPredictor(initial_pos=anchor, alpha=0.6)
+    ambiguous_count = 0
+    motion_rejected_count = 0
 
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
@@ -802,34 +803,36 @@ def stabilize_folder(
         else:
             pt = None
             angle = None
+            ambiguous = False
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            tm_result = _template_match_perforation(
+            predicted = predictor.predict()
+            candidates = _template_match_candidates(
                 gray,
                 template,
-                min_confidence=0.4,
-                search_center=last_pos,
+                k=5,
+                search_center=predicted,
                 search_radius=search_radius,
+                min_confidence=0.3,
             )
-            if tm_result is not None:
-                cx, cy, _conf = tm_result
-                jump = ((cx - last_pos[0]) ** 2 + (cy - last_pos[1]) ** 2) ** 0.5
-                if jump > max_jump:
-                    log(
-                        f"Salto implausible ({jump:.0f}px) en "
-                        f"{os.path.basename(f)}; se interpolará."
-                    )
-                else:
-                    pt = (cx, cy)
-                    last_pos = pt
-                    if rot_template is not None:
-                        angle = _estimate_rotation(gray, rot_template, cx, cy)
+            ranked, ambiguous = _rank_candidates(candidates, predicted, perf_spacing)
+            if ambiguous:
+                ambiguous_count += 1
+                log(f"Ambigüedad en {os.path.basename(f)}; uso predicción previa.")
+                motion_rejected_count += 1
+            elif ranked:
+                cx, cy, _ncc, _combined = ranked[0]
+                pt = (cx, cy)
+                predictor.update(pt)
+                if rot_template is not None:
+                    angle = _estimate_rotation(gray, rot_template, cx, cy)
 
             points.append(pt)
             angles.append(angle)
             if pt is None:
                 failures += 1
-                log(f"Sin detección: {os.path.basename(f)}")
+                if not ambiguous:
+                    log(f"Sin detección: {os.path.basename(f)}")
                 # Save debug image if requested
                 if debug_dir:
                     try:
@@ -837,16 +840,30 @@ def stabilize_folder(
                             os.path.splitext(os.path.basename(f))[0] + "_debug.jpg"
                         )
                         debug_path = os.path.join(debug_dir, basename)
-                        h_f, w_f = frame.shape[:2]
-                        th, tw = template.shape[:2]
-                        pr_y = th // 2
-                        pr_x = tw // 2
-                        x0 = max(0, int(anchor[0]) - pr_x)
-                        y0 = max(0, int(anchor[1]) - pr_y)
-                        x1 = min(w_f, int(anchor[0]) + pr_x)
-                        y1 = min(h_f, int(anchor[1]) + pr_y)
-                        patch = frame[y0:y1, x0:x1].copy()
-                        cv2.imwrite(debug_path, patch, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        dbg = frame.copy()
+                        for rank_idx, c in enumerate(ranked[:5]):
+                            cx_c, cy_c, ncc_c, _sc = c
+                            color = (0, 255, 0) if rank_idx == 0 else (0, 165, 255)
+                            cv2.circle(dbg, (int(cx_c), int(cy_c)), 20, color, 3)
+                            cv2.putText(
+                                dbg,
+                                f"#{rank_idx + 1} {ncc_c:.2f}",
+                                (int(cx_c) + 25, int(cy_c)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                color,
+                                2,
+                            )
+                        px_p, py_p = predicted
+                        cv2.drawMarker(
+                            dbg,
+                            (int(px_p), int(py_p)),
+                            (255, 0, 255),
+                            cv2.MARKER_CROSS,
+                            30,
+                            2,
+                        )
+                        cv2.imwrite(debug_path, dbg, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     except Exception as exc:
                         log(f"Debug image failed: {exc}")
         if progress_cb:
@@ -875,9 +892,7 @@ def stabilize_folder(
     # Interpolate missing angles (ECC failures, out-of-bounds) then smooth.
     # Raw per-frame ECC on a small patch is noisy at the sub-tenth-degree
     # scale; without smoothing that noise warps every frame slightly.
-    ang = np.array(
-        [a if a is not None else np.nan for a in angles], dtype=np.float32
-    )
+    ang = np.array([a if a is not None else np.nan for a in angles], dtype=np.float32)
     idx_a = np.arange(len(ang))
     good_a = np.isfinite(ang)
     if np.any(good_a):
@@ -909,9 +924,7 @@ def stabilize_folder(
             pt = per_frame[i - 1]
             dx = target_x - pt[0]
             dy = target_y - pt[1]
-            angle = (
-                per_frame_angles[i - 1] if i - 1 < len(per_frame_angles) else 0.0
-            )
+            angle = per_frame_angles[i - 1] if i - 1 < len(per_frame_angles) else 0.0
 
             # Build rotation + translation matrix.
             # Rotate around the detected position to correct in-gate tilt,
@@ -948,6 +961,10 @@ def stabilize_folder(
     summary = {
         "total_frames": total,
         "failed_detections": failures,
+        "ambiguous_frames": ambiguous_count,
+        "motion_rejected_frames": motion_rejected_count,
+        "perf_spacing_px": round(float(perf_spacing), 1),
+        "search_radius_px": int(search_radius),
         "target_x": round(target_x, 3),
         "target_y": round(target_y, 3),
         "output_width": out_w,
