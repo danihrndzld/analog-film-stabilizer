@@ -172,6 +172,155 @@ def _build_perforation_template(frame, anchor, patch_radius=None):
     return template, (x0, y0)
 
 
+def _subpixel_refine(result, mx, my):
+    """Parabolic sub-pixel refinement around an integer correlation peak.
+
+    Returns refined (sx, sy) floats; falls back to the integer location
+    when the quadratic fit is degenerate or the peak is at the boundary.
+    """
+    rh, rw = result.shape
+    sx, sy = float(mx), float(my)
+
+    if 0 < mx < rw - 1:
+        left = float(result[my, mx - 1])
+        center = float(result[my, mx])
+        right = float(result[my, mx + 1])
+        denom = 2.0 * (2.0 * center - left - right)
+        if abs(denom) > 1e-6:
+            sx = mx + (left - right) / denom
+
+    if 0 < my < rh - 1:
+        top = float(result[my - 1, mx])
+        center = float(result[my, mx])
+        bottom = float(result[my + 1, mx])
+        denom = 2.0 * (2.0 * center - top - bottom)
+        if abs(denom) > 1e-6:
+            sy = my + (top - bottom) / denom
+
+    return sx, sy
+
+
+def _extract_top_k_peaks(corr_map, k=5, suppression_radius=None):
+    """Return the top-K local maxima of a correlation map.
+
+    Iteratively finds the global maximum via ``cv2.minMaxLoc``, records it,
+    and suppresses a square window of half-size ``suppression_radius``
+    around the peak before repeating. Each returned peak is sub-pixel
+    refined on the unmodified correlation surface.
+
+    Parameters
+    ----------
+    corr_map : np.ndarray
+        2D correlation surface (as produced by ``cv2.matchTemplate``).
+    k : int
+        Number of peaks to extract. Fewer may be returned if the map is
+        exhausted by suppression before reaching K.
+    suppression_radius : int or None
+        Half-size of the square suppression window. Defaults to
+        ``min(corr_map.shape) // 8`` when None.
+
+    Returns
+    -------
+    list[tuple(float, float, float)]
+        Entries are ``(sx, sy, score)`` in correlation-map coordinates
+        (integer top-left + sub-pixel offset). Sorted by score descending.
+    """
+    rh, rw = corr_map.shape
+    if suppression_radius is None:
+        suppression_radius = max(1, min(rh, rw) // 8)
+    suppression_radius = int(suppression_radius)
+
+    # Preserve the original surface for sub-pixel refinement
+    working = corr_map.copy()
+    peaks = []
+    very_low = float(corr_map.min()) - 1.0
+
+    for _ in range(max(1, int(k))):
+        _, max_val, _, max_loc = cv2.minMaxLoc(working)
+        if not np.isfinite(max_val):
+            break
+        mx, my = int(max_loc[0]), int(max_loc[1])
+        sx, sy = _subpixel_refine(corr_map, mx, my)
+        peaks.append((sx, sy, float(max_val)))
+
+        # Suppress a neighbourhood around this peak so the next iteration
+        # picks a genuinely different local maximum
+        sx0 = max(0, mx - suppression_radius)
+        sy0 = max(0, my - suppression_radius)
+        sx1 = min(rw, mx + suppression_radius + 1)
+        sy1 = min(rh, my + suppression_radius + 1)
+        working[sy0:sy1, sx0:sx1] = very_low
+
+        # Bail out early if the remaining surface has nothing left to offer
+        if float(working.max()) <= very_low:
+            break
+
+    return peaks
+
+
+def _template_match_candidates(
+    gray,
+    template,
+    k=5,
+    search_center=None,
+    search_radius=None,
+    suppression_radius=None,
+    min_confidence=0.0,
+):
+    """Locate up to K perforation candidates via NCC top-K peaks.
+
+    Same ROI-restricted matching contract as ``_template_match_perforation``
+    but returns a ranked list of candidates instead of the single global
+    best. ``suppression_radius`` defaults to roughly half a template size
+    so distinct perforations are returned as separate peaks.
+
+    Returns
+    -------
+    list[tuple(float, float, float)]
+        ``(cx, cy, ncc)`` entries in full-frame coordinates, sorted by NCC
+        score descending. Empty list when the ROI is too small or no peak
+        meets ``min_confidence``.
+    """
+    th, tw = template.shape[:2]
+    h, w = gray.shape[:2]
+    if h < th or w < tw:
+        return []
+
+    roi_x0 = 0
+    roi_y0 = 0
+    roi = gray
+
+    if search_center is not None and search_radius is not None:
+        sx_c, sy_c = search_center
+        if np.isfinite(sx_c) and np.isfinite(sy_c):
+            rx = int(search_radius) + tw // 2
+            ry = int(search_radius) + th // 2
+            x0 = max(0, int(sx_c) - rx)
+            y0 = max(0, int(sy_c) - ry)
+            x1 = min(w, int(sx_c) + rx)
+            y1 = min(h, int(sy_c) + ry)
+            if x1 - x0 >= tw and y1 - y0 >= th:
+                roi_x0, roi_y0 = x0, y0
+                roi = gray[y0:y1, x0:x1]
+
+    corr = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+
+    if suppression_radius is None:
+        # Half a template size -- enough to force distinct perforations
+        suppression_radius = max(th, tw) // 2
+
+    peaks = _extract_top_k_peaks(corr, k=k, suppression_radius=suppression_radius)
+
+    candidates = []
+    for sx, sy, score in peaks:
+        if score < min_confidence:
+            continue
+        cx = roi_x0 + sx + tw / 2.0
+        cy = roi_y0 + sy + th / 2.0
+        candidates.append((cx, cy, score))
+    return candidates
+
+
 def _template_match_perforation(
     gray,
     template,

@@ -18,6 +18,8 @@ from perforation_stabilizer_app import (
     _build_perforation_template,
     _detect_perf_bbox,
     _estimate_rotation,
+    _extract_top_k_peaks,
+    _template_match_candidates,
     _template_match_perforation,
     stabilize_folder,
 )
@@ -231,6 +233,82 @@ class TestTemplateMatching:
         assert r1 is not None and r2 is not None
         assert abs(r1[0] - r2[0]) < 0.01
         assert abs(r1[1] - r2[1]) < 0.01
+
+
+# ── Multi-peak (top-K) matching ───────────────────────────────────────────────
+
+class TestMultiPeakMatching:
+
+    def test_extract_top_k_finds_multiple_peaks(self):
+        """A synthetic correlation map with 3 clear peaks yields them ranked."""
+        corr = np.zeros((200, 200), dtype=np.float32)
+        peaks_expected = [(50, 50, 0.9), (150, 150, 0.7), (50, 150, 0.5)]
+        for x, y, v in peaks_expected:
+            corr[y, x] = v
+
+        peaks = _extract_top_k_peaks(corr, k=3, suppression_radius=20)
+        assert len(peaks) == 3
+        # Scores descending
+        scores = [p[2] for p in peaks]
+        assert scores == sorted(scores, reverse=True)
+        # Top peak matches the highest synthetic value
+        assert abs(peaks[0][0] - 50) < 1 and abs(peaks[0][1] - 50) < 1
+        assert abs(peaks[0][2] - 0.9) < 0.01
+
+    def test_extract_top_k_respects_suppression(self):
+        """Peaks closer than suppression_radius are not both returned."""
+        corr = np.zeros((100, 100), dtype=np.float32)
+        corr[50, 50] = 0.9
+        corr[50, 55] = 0.85  # within suppression_radius=20 of first
+
+        peaks = _extract_top_k_peaks(corr, k=5, suppression_radius=20)
+        # The suppressed second-peak should NOT appear as a distinct entry
+        distinct_peaks = [
+            p for p in peaks
+            if abs(p[0] - 50) > 1 or abs(p[1] - 50) > 1
+        ]
+        # None of the returned "distinct" peaks should carry 0.85 --
+        # it was suppressed because it fell inside the first peak's
+        # neighbourhood.
+        for _, _, score in distinct_peaks:
+            assert score < 0.85 - 0.01
+
+    def test_template_match_candidates_returns_both_perfs(self):
+        """On a frame with two identical perfs, candidates contain both."""
+        tpl_frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        tpl, _ = _build_perforation_template(tpl_frame, anchor)
+        two_perf = make_frame([0.25, 0.75])
+        gray = cv2.cvtColor(two_perf, cv2.COLOR_BGR2GRAY)
+
+        candidates = _template_match_candidates(
+            gray, tpl, k=5, min_confidence=0.3
+        )
+        # Need at least two high-confidence candidates near the two perfs
+        upper = _perf_centroid(0.25)
+        lower = _perf_centroid(0.75)
+        matched_upper = any(
+            abs(c[0] - upper[0]) < 15 and abs(c[1] - upper[1]) < 15
+            for c in candidates
+        )
+        matched_lower = any(
+            abs(c[0] - lower[0]) < 15 and abs(c[1] - lower[1]) < 15
+            for c in candidates
+        )
+        assert matched_upper and matched_lower, (
+            f"Expected both perfs in candidates, got: {candidates}"
+        )
+
+    def test_template_match_candidates_empty_on_blank_frame(self):
+        """A blank frame below min_confidence returns an empty candidate list."""
+        frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        tpl, _ = _build_perforation_template(frame, anchor)
+        blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        candidates = _template_match_candidates(
+            blank, tpl, k=5, min_confidence=0.5
+        )
+        assert candidates == []
 
 
 # ── Rotation estimation ───────────────────────────────────────────────────────
