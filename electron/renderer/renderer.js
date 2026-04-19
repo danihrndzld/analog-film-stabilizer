@@ -298,7 +298,7 @@ window.api.onDone((summary) => {
     `${summary.failed_detections} sin detección`,
   ];
   if (ambiguous > 0) parts.push(`${ambiguous} ambiguos`);
-  if (rejected > 0 && rejected !== ambiguous) parts.push(`${rejected} rechazados por movimiento`);
+  if (rejected > 0) parts.push(`${rejected} rechazadas por movimiento (fuera de rango)`);
   parts.push(`salida: ${summary.output_width}×${summary.output_height} px`);
   addLog(`Listo — ${parts.join(' · ')}`, 'success');
 });
