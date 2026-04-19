@@ -252,7 +252,6 @@ function startProcess() {
   window.api.startProcess({
     input,
     output,
-    smooth:      parseInt(document.getElementById('paramSmooth').value, 10)    || 9,
     quality:     (q => Number.isFinite(q) ? q : 95)(parseInt(document.getElementById('paramQuality').value, 10)),
     debugFrames: debugFramesPathEl.value.trim(),
     anchorX:     previewAnchor.x,

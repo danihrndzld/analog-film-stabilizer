@@ -46,11 +46,10 @@ Pure processing module (no UI). Two-stage pipeline:
 
 1. **Template building** — `_build_perforation_template()` extracts a grayscale patch (default 60px radius) around the user-selected anchor point from the first frame. This patch becomes the reference template for alignment.
 
-2. **Stabilization pass** — `stabilize_folder()` requires a user-provided `anchor` (x, y) tuple. It builds the template from the first frame, then uses `_template_match_perforation()` (normalized cross-correlation with sub-pixel precision via parabolic fitting) to locate the anchor in every frame. Failed frames are interpolated from neighbors. Each frame is translated (and optionally rotation-corrected via `_estimate_rotation()` using ECC) to lock the anchor to a fixed position. The user's anchor IS the target position.
+2. **Stabilization pass** — `stabilize_folder()` requires a user-provided `anchor` (x, y) tuple. It builds the template from the first frame, then uses `_template_match_candidates()` (normalized cross-correlation with sub-pixel precision via parabolic fitting, top-K peaks) plus motion-predictor ranking (`_rank_candidates`) to locate the anchor in every frame. Ambiguous frames reuse the predicted position; motion-rejected frames are interpolated from neighbors. Each frame is translated (no rotation) to lock the anchor to a fixed pixel position. The user's anchor IS the target position.
 
 Key parameters:
 - **`anchor`**: (x, y) tuple — user-selected reference point (required)
-- **`smooth_radius`**: moving average window half-size — default `9`
 - **`jpeg_quality`**: JPEG 1–100 or `0` for PNG lossless
 - **`border_mode`**: `'replicate'`, `'constant'`, or `'reflect'`
 
@@ -66,7 +65,7 @@ Used by the Electron UI. Two modes, both emit JSON-lines to stdout:
 
 **Batch mode** (default):
 ```
---input DIR --output DIR --anchor-x N --anchor-y N [--smooth N] [--quality N] [--debug-frames DIR] [--border-mode STR]
+--input DIR --output DIR --anchor-x N --anchor-y N [--quality N] [--debug-frames DIR] [--border-mode STR]
 ```
 
 **Preview mode** (saves first frame as preview JPEG):

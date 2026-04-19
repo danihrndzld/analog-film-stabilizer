@@ -6,7 +6,7 @@ Streams JSON-lines to stdout so Electron can consume progress and logs.
 Modes:
   batch (default)
     --input DIR --output DIR --anchor-x N --anchor-y N
-    [--smooth N] [--quality N] [--debug-frames DIR] [--border-mode STR]
+    [--quality N] [--debug-frames DIR] [--border-mode STR]
 
   preview
     --frame-path FILE --preview-out FILE
@@ -62,7 +62,6 @@ def run_batch(args):
             anchor=anchor,
             progress_cb=lambda v: emit({"type": "progress", "value": v}),
             log_cb=lambda m: emit({"type": "log", "msg": m}),
-            smooth_radius=args.smooth,
             jpeg_quality=args.quality,
             debug_dir=args.debug_frames,
             border_mode=args.border_mode,
@@ -98,9 +97,6 @@ def main():
         type=float,
         default=None,
         help="Reference anchor Y coordinate (required for batch)",
-    )
-    parser.add_argument(
-        "--smooth", type=int, default=9, help="Moving-average radius (default 9)"
     )
     parser.add_argument(
         "--quality", type=int, default=95, help="JPEG quality 1-100, 0=PNG (default 95)"

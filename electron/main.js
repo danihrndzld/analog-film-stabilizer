@@ -128,7 +128,6 @@ ipcMain.handle('start-process', (event, opts) => {
       '--output',   opts.output,
       '--anchor-x', String(opts.anchorX),
       '--anchor-y', String(opts.anchorY),
-      '--smooth',   String(opts.smooth),
       '--quality',  String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
@@ -142,7 +141,6 @@ ipcMain.handle('start-process', (event, opts) => {
       '--output',   opts.output,
       '--anchor-x', String(opts.anchorX),
       '--anchor-y', String(opts.anchorY),
-      '--smooth',   String(opts.smooth),
       '--quality',  String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);

@@ -1,5 +1,6 @@
 import glob
 import os
+from collections import namedtuple
 
 import cv2
 import numpy as np
@@ -15,33 +16,16 @@ def list_images(folder):
     return sorted(files)
 
 
-def moving_average(points, radius=9):
-    xs = np.array([p[0] if p is not None else np.nan for p in points], dtype=np.float32)
-    ys = np.array([p[1] if p is not None else np.nan for p in points], dtype=np.float32)
-
-    def fill_nans(arr):
-        idx = np.arange(len(arr))
-        good = np.isfinite(arr)
-        if not np.any(good):
-            return arr
-        arr[~good] = np.interp(idx[~good], idx[good], arr[good])
-        return arr
-
-    xs = fill_nans(xs)
-    ys = fill_nans(ys)
-
-    k = radius * 2 + 1
-    kernel = np.ones(k, dtype=np.float32) / k
-    xs_s = np.convolve(np.pad(xs, (radius, radius), mode="edge"), kernel, mode="valid")
-    ys_s = np.convolve(np.pad(ys, (radius, radius), mode="edge"), kernel, mode="valid")
-    return list(zip(xs_s.tolist(), ys_s.tolist(), strict=True))
-
-
 _BORDER_MODES = {
     "replicate": cv2.BORDER_REPLICATE,
     "constant": cv2.BORDER_CONSTANT,
     "reflect": cv2.BORDER_REFLECT_101,
 }
+
+
+_FrameOutcome = namedtuple(
+    "_FrameOutcome", "pt ambiguous motion_rejected ranked predicted"
+)
 
 
 # ── Template matching alignment ──────────────────────────────────────────────
@@ -122,20 +106,11 @@ def _build_perforation_template(frame, anchor, patch_radius=None):
     When ``patch_radius`` is an int, behaves like the legacy square crop
     with that radius.
 
-    Parameters
-    ----------
-    frame : np.ndarray
-        Full BGR frame.
-    anchor : tuple(float, float)
-        User-selected (x, y) in full-frame coordinates.
-    patch_radius : int or None
-        If None, auto-scale. Otherwise use as square half-size.
-
     Returns
     -------
-    (template, origin) : (np.ndarray, (int, int))
-        Grayscale template patch and the (x0, y0) origin of the patch in the
-        frame. Returns (None, None) if extraction fails.
+    (template, anchor_in_tpl) : (np.ndarray, (float, float))
+        Grayscale template patch and the (ax, ay) sub-pixel position of the
+        anchor within the template. Returns (None, None) if extraction fails.
     """
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -167,7 +142,8 @@ def _build_perforation_template(frame, anchor, patch_radius=None):
         return None, None
 
     template = gray[y0:y1, x0:x1].copy()
-    return template, (x0, y0)
+    anchor_in_tpl = (float(cx) - x0, float(cy) - y0)
+    return template, anchor_in_tpl
 
 
 def _subpixel_refine(result, mx, my):
@@ -203,19 +179,12 @@ def _extract_top_k_peaks(corr_map, k=5, suppression_radius=None):
 
     Iteratively finds the global maximum via ``cv2.minMaxLoc``, records it,
     and suppresses a square window of half-size ``suppression_radius``
-    around the peak before repeating. Each returned peak is sub-pixel
-    refined on the unmodified correlation surface.
+    around the peak before repeating. Each peak is sub-pixel refined using
+    the current surface; if a ±1 neighbour was already poisoned by a prior
+    suppression window, that axis falls back to the integer peak.
 
-    Parameters
-    ----------
-    corr_map : np.ndarray
-        2D correlation surface (as produced by ``cv2.matchTemplate``).
-    k : int
-        Number of peaks to extract. Fewer may be returned if the map is
-        exhausted by suppression before reaching K.
-    suppression_radius : int or None
-        Half-size of the square suppression window. Defaults to
-        ``min(corr_map.shape) // 8`` when None.
+    Note: ``corr_map`` is consumed in place to avoid allocating a copy on
+    every frame (this is on the hot path).
 
     Returns
     -------
@@ -228,30 +197,42 @@ def _extract_top_k_peaks(corr_map, k=5, suppression_radius=None):
         suppression_radius = max(1, min(rh, rw) // 8)
     suppression_radius = int(suppression_radius)
 
-    # Preserve the original surface for sub-pixel refinement
-    working = corr_map.copy()
     peaks = []
     very_low = float(corr_map.min()) - 1.0
+    guard = very_low + 0.5  # anything <= guard is a poisoned neighbour
 
     for _ in range(max(1, int(k))):
-        _, max_val, _, max_loc = cv2.minMaxLoc(working)
-        if not np.isfinite(max_val):
+        _, max_val, _, max_loc = cv2.minMaxLoc(corr_map)
+        if not np.isfinite(max_val) or max_val <= guard:
             break
         mx, my = int(max_loc[0]), int(max_loc[1])
-        sx, sy = _subpixel_refine(corr_map, mx, my)
+
+        # Guarded sub-pixel refine: skip axis if neighbour was suppressed
+        sx, sy = float(mx), float(my)
+        if 0 < mx < rw - 1:
+            left = float(corr_map[my, mx - 1])
+            right = float(corr_map[my, mx + 1])
+            if left > guard and right > guard:
+                center = float(corr_map[my, mx])
+                denom = 2.0 * (2.0 * center - left - right)
+                if abs(denom) > 1e-6:
+                    sx = mx + (left - right) / denom
+        if 0 < my < rh - 1:
+            top = float(corr_map[my - 1, mx])
+            bottom = float(corr_map[my + 1, mx])
+            if top > guard and bottom > guard:
+                center = float(corr_map[my, mx])
+                denom = 2.0 * (2.0 * center - top - bottom)
+                if abs(denom) > 1e-6:
+                    sy = my + (top - bottom) / denom
+
         peaks.append((sx, sy, float(max_val)))
 
-        # Suppress a neighbourhood around this peak so the next iteration
-        # picks a genuinely different local maximum
         sx0 = max(0, mx - suppression_radius)
         sy0 = max(0, my - suppression_radius)
         sx1 = min(rw, mx + suppression_radius + 1)
         sy1 = min(rh, my + suppression_radius + 1)
-        working[sy0:sy1, sx0:sx1] = very_low
-
-        # Bail out early if the remaining surface has nothing left to offer
-        if float(working.max()) <= very_low:
-            break
+        corr_map[sy0:sy1, sx0:sx1] = very_low
 
     return peaks
 
@@ -264,13 +245,14 @@ def _template_match_candidates(
     search_radius=None,
     suppression_radius=None,
     min_confidence=0.0,
+    anchor_in_tpl=None,
 ):
     """Locate up to K perforation candidates via NCC top-K peaks.
 
-    Same ROI-restricted matching contract as ``_template_match_perforation``
-    but returns a ranked list of candidates instead of the single global
-    best. ``suppression_radius`` defaults to roughly half a template size
-    so distinct perforations are returned as separate peaks.
+    ``anchor_in_tpl`` is the (ax, ay) position of the anchor within the
+    template; when None, defaults to the template centre (legacy behaviour).
+    Returned candidate coordinates are the anchor position in full-frame
+    coordinates, not the template centre.
 
     Returns
     -------
@@ -283,6 +265,11 @@ def _template_match_candidates(
     h, w = gray.shape[:2]
     if h < th or w < tw:
         return []
+
+    if anchor_in_tpl is None:
+        ax, ay = tw / 2.0, th / 2.0
+    else:
+        ax, ay = float(anchor_in_tpl[0]), float(anchor_in_tpl[1])
 
     roi_x0 = 0
     roi_y0 = 0
@@ -313,8 +300,8 @@ def _template_match_candidates(
     for sx, sy, score in peaks:
         if score < min_confidence:
             continue
-        cx = roi_x0 + sx + tw / 2.0
-        cy = roi_y0 + sy + th / 2.0
+        cx = roi_x0 + sx + ax
+        cy = roi_y0 + sy + ay
         candidates.append((cx, cy, score))
     return candidates
 
@@ -369,27 +356,15 @@ def _rank_candidates(
     among other candidates within ``perf_spacing`` — so a peak that stands
     alone ranks higher than one competing against a near-identical twin.
 
-    The ambiguity flag fires when:
-      - top-2 candidates have near-equal combined scores
-        (score_2 >= ambiguity_score_ratio × score_1), AND
-      - their positions are separated by ~perf_spacing
-        (within ``ambiguity_spacing_tol``)
-
-    This is the exact signature of "NCC locked onto a neighbouring
-    perforation" — the caller should skip updating the motion predictor
-    and reuse the predicted position for the frame.
-
     Returns
     -------
     (ranked, ambiguous) : (list, bool)
         ``ranked`` is the candidate list sorted by combined score
         descending. Each entry is ``(cx, cy, ncc, combined_score)``.
-        ``ambiguous`` is True when perf-to-perf ambiguity is detected.
     """
     if not candidates:
         return [], False
     if perf_spacing is None or perf_spacing <= 0:
-        # No spacing known: fall back to NCC-only ranking, no ambiguity
         ranked = sorted(
             ((cx, cy, ncc, ncc) for cx, cy, ncc in candidates),
             key=lambda t: t[3],
@@ -401,14 +376,14 @@ def _rank_candidates(
     perf_spacing = float(perf_spacing)
 
     scored = []
-    for cx, cy, ncc in candidates:
+    for i, (cx, cy, ncc) in enumerate(candidates):
         dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
         proximity = float(np.exp(-dist / perf_spacing))
 
-        # Dominance: compare against other candidates within perf_spacing
+        # Dominance: compare against other candidates (by index) within perf_spacing
         competing_ncc = 0.0
-        for ox, oy, oncc in candidates:
-            if ox == cx and oy == cy:
+        for j, (ox, oy, oncc) in enumerate(candidates):
+            if j == i:
                 continue
             odist = ((ox - cx) ** 2 + (oy - cy) ** 2) ** 0.5
             if odist <= perf_spacing and oncc > competing_ncc:
@@ -442,8 +417,10 @@ def _detect_perf_spacing(frame, anchor, search_radius=None):
 
     Scans a vertical strip centred on the anchor for Otsu-bright contours
     whose size is similar to the anchor's perforation, and returns the
-    median vertical centroid-to-centroid spacing. Falls back to None when
-    fewer than two perforations are detected.
+    median vertical centroid-to-centroid spacing. Returns None when fewer
+    than three perforations are detected or when the median spacing is
+    less than 1.5× the perforation height (spurious close-together
+    contours from e.g. sprocket shadow fragments).
     """
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -487,205 +464,96 @@ def _detect_perf_spacing(frame, anchor, search_radius=None):
             continue
         centers_y.append(by + bh / 2.0)
 
-    if len(centers_y) < 2:
+    # Require at least 3 centres: two centres yield a single delta, which is
+    # easy to fake with one spurious contour. Three centres give two deltas
+    # and a median that actually reflects repetition.
+    if len(centers_y) < 3:
         return None
 
     centers_y.sort()
     deltas = np.diff(centers_y)
-    return float(np.median(deltas))
+    median_delta = float(np.median(deltas))
+
+    # Reject implausibly tight spacings: real inter-perf spacing is several
+    # times the perforation height. Anything closer is a contour-fragment
+    # artefact, not genuine periodicity.
+    if median_delta < 1.5 * perf_h:
+        return None
+
+    return median_delta
 
 
-def _template_match_perforation(
-    gray,
+def _locate_anchor_in_frame(
+    frame,
     template,
-    min_confidence=0.4,
-    search_center=None,
-    search_radius=None,
+    anchor_in_tpl,
+    predictor,
+    search_radius,
+    perf_spacing,
+    min_confidence=0.3,
 ):
-    """Locate the anchor point in a frame using normalized cross-correlation.
+    """Locate the anchor in one frame. Returns a _FrameOutcome.
 
-    Uses cv2.matchTemplate with TM_CCOEFF_NORMED and parabolic sub-pixel
-    refinement on the correlation peak.
-
-    When ``search_center`` and ``search_radius`` are provided, matching is
-    restricted to an ROI around the expected position. This prevents the
-    global NCC peak from locking onto a neighbouring (near-identical)
-    perforation.
-
-    Parameters
-    ----------
-    gray : np.ndarray
-        Grayscale frame.
-    template : np.ndarray
-        Grayscale template patch.
-    min_confidence : float
-        Minimum NCC score to accept the match (0.0-1.0).
-    search_center : tuple(float, float) or None
-        Expected (x, y) position of the anchor in frame coordinates. When
-        given, search is limited to a box of radius ``search_radius``.
-    search_radius : int or None
-        Half-size (px) of the search box around ``search_center``. If the
-        resulting ROI cannot contain the template, falls back to a full
-        search.
-
-    Returns
-    -------
-    (cx, cy, confidence) or None
-        Sub-pixel (cx, cy) in frame coordinates and NCC confidence score,
-        or None if the match is below min_confidence.
+    Outcome semantics:
+      - success: ``pt`` is the detected (cx, cy); predictor updated by caller
+      - ambiguous: perf-to-perf ambiguity. ``pt`` is the predicted position
+        (used for this frame's warp so the sequence does not jump), but the
+        predictor is NOT updated — a swapped perf must not contaminate
+        future predictions
+      - motion_rejected: no candidates in the search ROI at all. ``pt`` is
+        None; the frame will be interpolated from neighbours
+      - no_candidates: candidates exist but all below min_confidence;
+        treated as motion_rejected
     """
+    predicted = predictor.predict()
 
-    th, tw = template.shape[:2]
-    h, w = gray.shape[:2]
-    if h < th or w < tw:
-        return None
-
-    roi_x0 = 0
-    roi_y0 = 0
-    roi = gray
-
-    if search_center is not None and search_radius is not None:
-        sx_c, sy_c = search_center
-        if np.isfinite(sx_c) and np.isfinite(sy_c):
-            # Expand ROI by template half-size so the template fits around
-            # the expected centre on all sides.
-            rx = int(search_radius) + tw // 2
-            ry = int(search_radius) + th // 2
-            x0 = max(0, int(sx_c) - rx)
-            y0 = max(0, int(sy_c) - ry)
-            x1 = min(w, int(sx_c) + rx)
-            y1 = min(h, int(sy_c) + ry)
-            if x1 - x0 >= tw and y1 - y0 >= th:
-                roi_x0, roi_y0 = x0, y0
-                roi = gray[y0:y1, x0:x1]
-
-    result = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-
-    if max_val < min_confidence:
-        return None
-
-    mx, my = max_loc  # top-left of best match within ROI (integer)
-
-    # Sub-pixel refinement via parabolic interpolation on the correlation surface
-    rh, rw = result.shape
-    sx, sy = float(mx), float(my)
-
-    if 0 < mx < rw - 1:
-        left = float(result[my, mx - 1])
-        center = float(result[my, mx])
-        right = float(result[my, mx + 1])
-        denom = 2.0 * (2.0 * center - left - right)
-        if abs(denom) > 1e-6:
-            sx = mx + (left - right) / denom
-
-    if 0 < my < rh - 1:
-        top = float(result[my - 1, mx])
-        center = float(result[my, mx])
-        bottom = float(result[my + 1, mx])
-        denom = 2.0 * (2.0 * center - top - bottom)
-        if abs(denom) > 1e-6:
-            sy = my + (top - bottom) / denom
-
-    # Convert from ROI match top-left to template center in frame coords
-    cx = roi_x0 + sx + tw / 2.0
-    cy = roi_y0 + sy + th / 2.0
-
-    return (cx, cy, max_val)
-
-
-def _build_rotation_template(frame, anchor, half_w=None, half_h=None):
-    """Extract a tall grayscale strip around the anchor for rotation ECC.
-
-    A taller crop gives ECC more vertical lever arm, so sub-tenth-degree
-    rotation is estimated more stably than from a square patch. When
-    ``half_h`` is None, it is auto-scaled to ~30% of the frame height
-    (capped at 1000 px to bound ECC memory) so high-resolution scans
-    (e.g. 4056×3040) get meaningful rotational resolution instead of the
-    legacy 300-px strip. ``half_w`` defaults to the detected perforation
-    width, scaling horizontal context with the scan resolution.
-    """
+    # Crop BGR ROI around the prediction first, then grayscale only that ROI.
+    # Whole-frame grayscale on a 4056×3040 scan is pure waste — we only search
+    # inside ±search_radius anyway.
     h, w = frame.shape[:2]
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    cx, cy = anchor
-    if not (np.isfinite(cx) and np.isfinite(cy)):
-        return None
-
-    half_h = int(min(1000, max(150, h * 0.3))) if half_h is None else int(half_h)
-
-    if half_w is None:
-        bbox = _detect_perf_bbox(frame, anchor)
-        if bbox is not None:
-            perf_w, _ = bbox
-            half_w = max(60, int(perf_w * 0.6))
-        else:
-            half_w = 60
-    else:
-        half_w = int(half_w)
-
-    x0 = max(0, int(cx - half_w))
-    y0 = max(0, int(cy - half_h))
-    x1 = min(w, int(cx + half_w))
-    y1 = min(h, int(cy + half_h))
-
-    if x1 - x0 < 20 or y1 - y0 < 20:
-        return None
-
-    return gray[y0:y1, x0:x1].copy()
-
-
-def _estimate_rotation(gray, template, cx, cy):
-    """Estimate small rotation angle of the anchor region using ECC.
-
-    Uses cv2.findTransformECC with MOTION_EUCLIDEAN (translation + rotation).
-    ``template`` should typically be a tall strip around the anchor (see
-    ``_build_rotation_template``) so ECC has vertical lever arm.
-
-    Parameters
-    ----------
-    gray : np.ndarray
-        Grayscale frame.
-    template : np.ndarray
-        Grayscale reference crop (commonly the rotation strip).
-    cx, cy : float
-        Template-matched center position of the anchor in frame coordinates.
-
-    Returns
-    -------
-    float or None
-        Rotation angle in degrees (positive = counter-clockwise), or None
-        when ECC cannot be computed (out of bounds, convergence failure).
-    """
-    h, w = gray.shape[:2]
-
     th, tw = template.shape[:2]
-    x0 = int(round(cx - tw / 2.0))
-    y0 = int(round(cy - th / 2.0))
-    x1 = x0 + tw
-    y1 = y0 + th
-
-    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
-        return None
-
-    patch = gray[y0:y1, x0:x1]
-
-    warp_matrix = np.eye(2, 3, dtype=np.float32)
-    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-4)
-
-    try:
-        _, warp_matrix = cv2.findTransformECC(
-            template.astype(np.float32),
-            patch.astype(np.float32),
-            warp_matrix,
-            cv2.MOTION_EUCLIDEAN,
-            criteria,
+    px, py = predicted
+    if np.isfinite(px) and np.isfinite(py):
+        rx = int(search_radius) + tw
+        ry = int(search_radius) + th
+        x0 = max(0, int(px) - rx)
+        y0 = max(0, int(py) - ry)
+        x1 = min(w, int(px) + rx)
+        y1 = min(h, int(py) + ry)
+        roi_bgr = frame[y0:y1, x0:x1]
+        if roi_bgr.size == 0 or x1 - x0 < tw or y1 - y0 < th:
+            return _FrameOutcome(None, False, True, [], predicted)
+        gray_roi = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        # Search within the ROI; candidate coords come back in ROI space,
+        # then we translate to full-frame space.
+        roi_center = (px - x0, py - y0)
+        candidates = _template_match_candidates(
+            gray_roi,
+            template,
+            k=5,
+            search_center=roi_center,
+            search_radius=search_radius,
+            min_confidence=min_confidence,
+            anchor_in_tpl=anchor_in_tpl,
         )
-        # For EUCLIDEAN: [[cos θ, -sin θ, tx], [sin θ, cos θ, ty]]
-        angle_rad = np.arctan2(warp_matrix[1, 0], warp_matrix[0, 0])
-        return float(np.degrees(angle_rad))
-    except cv2.error:
-        return None
+        candidates = [(cx + x0, cy + y0, ncc) for cx, cy, ncc in candidates]
+    else:
+        return _FrameOutcome(None, False, True, [], predicted)
+
+    if not candidates:
+        return _FrameOutcome(None, False, True, [], predicted)
+
+    ranked, ambiguous = _rank_candidates(candidates, predicted, perf_spacing)
+    if ambiguous:
+        # Reuse prediction for the warp so the output frame isn't blank,
+        # but don't update the predictor — we don't trust this position.
+        return _FrameOutcome(predicted, True, False, ranked, predicted)
+
+    if ranked:
+        cx, cy, _ncc, _combined = ranked[0]
+        return _FrameOutcome((cx, cy), False, False, ranked, predicted)
+
+    return _FrameOutcome(None, False, True, ranked, predicted)
 
 
 def stabilize_folder(
@@ -694,7 +562,6 @@ def stabilize_folder(
     anchor,
     progress_cb=None,
     log_cb=None,
-    smooth_radius=9,
     jpeg_quality=0,
     debug_dir=None,
     border_mode="replicate",
@@ -714,8 +581,6 @@ def stabilize_folder(
         Called with a float 0.0-1.0 indicating progress.
     log_cb : callable or None
         Called with log message strings.
-    smooth_radius : int
-        Moving average window half-size for position smoothing.
     jpeg_quality : int
         JPEG quality 1-100, or 0 for PNG lossless output.
     debug_dir : str or None
@@ -756,7 +621,7 @@ def stabilize_folder(
     if first_frame is None:
         raise RuntimeError("No pude abrir ningún frame de la carpeta.")
 
-    template, _ = _build_perforation_template(first_frame, anchor)
+    template, anchor_in_tpl = _build_perforation_template(first_frame, anchor)
     if template is None:
         raise RuntimeError(
             f"No pude extraer plantilla en el punto ({anchor[0]:.0f}, {anchor[1]:.0f}). "
@@ -775,21 +640,18 @@ def stabilize_folder(
     # ── Phase 2: Detect anchor position in all frames via template matching ──
     log("Fase 2: alineando frames...")
 
-    # Detect inter-perforation spacing from first frame — used to calibrate
-    # the search radius and to feed the ranking / ambiguity detector.
     perf_spacing = _detect_perf_spacing(first_frame, anchor)
     if perf_spacing is None:
-        # Fallback: use frame-height heuristic (Regular 8mm has ~1 perf per frame)
-        perf_spacing = float(first_frame.shape[0]) * 0.5
-        log(
-            f"No detecté espaciado entre perfs; usando heurística {perf_spacing:.0f}px."
+        raise RuntimeError(
+            "No pude detectar el espaciado entre perforaciones en el primer frame. "
+            "Asegúrate de que el punto seleccionado esté sobre una perforación clara "
+            "y que el encuadre incluya al menos tres perforaciones visibles."
         )
-    else:
-        log(f"Espaciado entre perforaciones detectado: {perf_spacing:.0f}px.")
+    log(f"Espaciado entre perforaciones detectado: {perf_spacing:.0f}px.")
 
-    # Search radius: generous enough to find the perf even after real jitter,
-    # but < perf_spacing so NCC cannot reach the neighbouring perforation.
-    search_radius = int(max(120, min(perf_spacing * 0.45, perf_spacing - 40)))
+    # Search radius: generous enough to absorb real jitter but strictly less
+    # than perf_spacing so NCC cannot reach a neighbouring perforation.
+    search_radius = int(min(max(perf_spacing * 0.45, 80), perf_spacing - 40))
     predictor = _MotionPredictor(initial_pos=anchor, alpha=0.6)
     ambiguous_count = 0
     motion_rejected_count = 0
@@ -801,67 +663,67 @@ def stabilize_folder(
             failures += 1
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
-            pt = None
-            ambiguous = False
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            predicted = predictor.predict()
-            candidates = _template_match_candidates(
-                gray,
+            outcome = _locate_anchor_in_frame(
+                frame,
                 template,
-                k=5,
-                search_center=predicted,
-                search_radius=search_radius,
+                anchor_in_tpl,
+                predictor,
+                search_radius,
+                perf_spacing,
                 min_confidence=0.3,
             )
-            ranked, ambiguous = _rank_candidates(candidates, predicted, perf_spacing)
-            if ambiguous:
+
+            if outcome.ambiguous:
                 ambiguous_count += 1
                 log(f"Ambigüedad en {os.path.basename(f)}; uso predicción previa.")
+                # Use predicted position so the frame still warps, but don't
+                # update the predictor (see _locate_anchor_in_frame docstring).
+                points.append(outcome.pt)
+            elif outcome.motion_rejected:
                 motion_rejected_count += 1
-            elif ranked:
-                cx, cy, _ncc, _combined = ranked[0]
-                pt = (cx, cy)
-                predictor.update(pt)
-
-            points.append(pt)
-            if pt is None:
+                points.append(None)
                 failures += 1
-                if not ambiguous:
-                    log(f"Sin detección: {os.path.basename(f)}")
-                # Save debug image if requested
-                if debug_dir:
-                    try:
-                        basename = (
-                            os.path.splitext(os.path.basename(f))[0] + "_debug.jpg"
-                        )
-                        debug_path = os.path.join(debug_dir, basename)
-                        dbg = frame.copy()
-                        for rank_idx, c in enumerate(ranked[:5]):
-                            cx_c, cy_c, ncc_c, _sc = c
-                            color = (0, 255, 0) if rank_idx == 0 else (0, 165, 255)
-                            cv2.circle(dbg, (int(cx_c), int(cy_c)), 20, color, 3)
-                            cv2.putText(
-                                dbg,
-                                f"#{rank_idx + 1} {ncc_c:.2f}",
-                                (int(cx_c) + 25, int(cy_c)),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.6,
-                                color,
-                                2,
-                            )
-                        px_p, py_p = predicted
-                        cv2.drawMarker(
+                log(
+                    f"Sin detección dentro del rango de búsqueda: {os.path.basename(f)}"
+                )
+            elif outcome.pt is not None:
+                predictor.update(outcome.pt)
+                points.append(outcome.pt)
+            else:
+                points.append(None)
+                failures += 1
+                log(f"Sin detección: {os.path.basename(f)}")
+
+            if outcome.pt is None and debug_dir:
+                try:
+                    basename = os.path.splitext(os.path.basename(f))[0] + "_debug.jpg"
+                    debug_path = os.path.join(debug_dir, basename)
+                    dbg = frame.copy()
+                    for rank_idx, c in enumerate(outcome.ranked[:5]):
+                        cx_c, cy_c, ncc_c, _sc = c
+                        color = (0, 255, 0) if rank_idx == 0 else (0, 165, 255)
+                        cv2.circle(dbg, (int(cx_c), int(cy_c)), 20, color, 3)
+                        cv2.putText(
                             dbg,
-                            (int(px_p), int(py_p)),
-                            (255, 0, 255),
-                            cv2.MARKER_CROSS,
-                            30,
+                            f"#{rank_idx + 1} {ncc_c:.2f}",
+                            (int(cx_c) + 25, int(cy_c)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            color,
                             2,
                         )
-                        cv2.imwrite(debug_path, dbg, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    except Exception as exc:
-                        log(f"Debug image failed: {exc}")
+                    px_p, py_p = outcome.predicted
+                    cv2.drawMarker(
+                        dbg,
+                        (int(px_p), int(py_p)),
+                        (255, 0, 255),
+                        cv2.MARKER_CROSS,
+                        30,
+                        2,
+                    )
+                    cv2.imwrite(debug_path, dbg, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                except Exception as exc:
+                    log(f"Debug image failed: {exc}")
         if progress_cb:
             progress_cb(i / (total * 2))
 

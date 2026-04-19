@@ -15,16 +15,15 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from perforation_stabilizer_app import (
-    _MotionPredictor,
     _build_perforation_template,
-    _build_rotation_template,
     _detect_perf_bbox,
     _detect_perf_spacing,
-    _estimate_rotation,
     _extract_top_k_peaks,
+    _FrameOutcome,
+    _locate_anchor_in_frame,
+    _MotionPredictor,
     _rank_candidates,
     _template_match_candidates,
-    _template_match_perforation,
     stabilize_folder,
 )
 
@@ -35,14 +34,15 @@ FRAME_W = 1200
 PERF_W = 70
 PERF_H = 100
 
+# Three perforation positions: perf_spacing must be >= 1.5 * PERF_H for
+# _detect_perf_spacing to accept the estimate. With FRAME_H=1000 and
+# PERF_H=100 these fractions give spacing = 300 px (>> 150).
+TRI_PERF = [0.2, 0.5, 0.8]
+
 
 def make_frame(perf_y_fracs, frame_h=FRAME_H, frame_w=FRAME_W,
                perf_w=PERF_W, perf_h=PERF_H):
-    """Return a BGR frame with bright rectangles at given vertical positions.
-
-    The rectangles are placed near the left side, horizontally centred in
-    the inner third of the left 22% strip.
-    """
+    """Return a BGR frame with bright rectangles at given vertical positions."""
     frame = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
     rw = max(50, int(frame_w * 0.22))
     cx = rw // 3
@@ -68,43 +68,69 @@ def _perf_centroid(y_frac=0.25, frame_h=FRAME_H, frame_w=FRAME_W):
     return (float(cx), float(cy))
 
 
+def _tri_frame():
+    """Three-perforation frame suitable for full stabilize_folder runs."""
+    return make_frame(TRI_PERF)
+
+
+def _tri_anchor():
+    """Middle-perforation anchor for _tri_frame()."""
+    return _perf_centroid(0.5)
+
+
 # ── Template building ──────────────────────────────────────────────────────────
 
 class TestBuildTemplate:
 
     def test_build_template_returns_patch(self):
-        """Template extraction from a frame with a known anchor produces a valid patch."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, origin = _build_perforation_template(frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         assert tpl is not None
         assert tpl.ndim == 2  # grayscale
         assert tpl.shape[0] > 10 and tpl.shape[1] > 10
-        assert origin is not None
+        assert anchor_in_tpl is not None
+        assert len(anchor_in_tpl) == 2
+
+    def test_build_template_anchor_offset_matches_input(self):
+        """anchor_in_tpl places the anchor inside the template at (cx-x0, cy-y0)."""
+        frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
+        assert tpl is not None
+        ax, ay = anchor_in_tpl
+        # Must fall inside the template
+        assert 0 <= ax <= tpl.shape[1]
+        assert 0 <= ay <= tpl.shape[0]
 
     def test_build_template_at_frame_edge(self):
-        """Anchor near (0, 0) clips to frame bounds without crashing."""
+        """Anchor near (0, 0) clips; anchor_in_tpl reflects the clipped offset."""
         frame = make_frame([0.01])
         anchor = (5.0, 5.0)
-        tpl, origin = _build_perforation_template(frame, anchor)
-        # Should either return a clipped patch or None — no crash
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         if tpl is not None:
             assert tpl.shape[0] > 0 and tpl.shape[1] > 0
+            ax, ay = anchor_in_tpl
+            # Clipped to frame origin: anchor offset inside tpl equals anchor coord
+            assert ax == pytest.approx(5.0)
+            assert ay == pytest.approx(5.0)
 
     def test_build_template_at_max_edge(self):
-        """Anchor at frame's max corner clips correctly."""
         frame = make_frame([0.25])
         anchor = (float(FRAME_W - 3), float(FRAME_H - 3))
-        tpl, origin = _build_perforation_template(frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         if tpl is not None:
             assert tpl.shape[0] > 0 and tpl.shape[1] > 0
+            ax, ay = anchor_in_tpl
+            # Anchor should land near the right/bottom of the template
+            assert ax > tpl.shape[1] // 2
+            assert ay > tpl.shape[0] // 2
 
     def test_build_template_non_finite_anchor(self):
-        """Non-finite anchor returns (None, None)."""
         frame = make_frame([0.25])
-        tpl, origin = _build_perforation_template(frame, (float("nan"), 100.0))
+        tpl, anchor_in_tpl = _build_perforation_template(frame, (float("nan"), 100.0))
         assert tpl is None
-        assert origin is None
+        assert anchor_in_tpl is None
 
 
 # ── Contextual template (auto-scaled, asymmetric vertical) ────────────────────
@@ -112,48 +138,33 @@ class TestBuildTemplate:
 class TestContextualTemplate:
 
     def test_auto_scaled_template_is_taller_than_wide(self):
-        """Default (patch_radius=None) produces a vertical-asymmetric template."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
         tpl, _ = _build_perforation_template(frame, anchor)
         assert tpl is not None
-        # Height should be clearly greater than width (captures perf + context)
-        assert tpl.shape[0] > tpl.shape[1], (
-            f"Expected tall template, got {tpl.shape}"
-        )
+        assert tpl.shape[0] > tpl.shape[1]
 
     def test_auto_scaled_template_is_larger_than_perf(self):
-        """Template height spans clearly more than the perforation itself."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
         tpl, _ = _build_perforation_template(frame, anchor)
         assert tpl is not None
-        assert tpl.shape[0] > PERF_H * 1.5, (
-            f"Template height {tpl.shape[0]} must exceed perf_h={PERF_H} "
-            "with vertical context"
-        )
+        assert tpl.shape[0] > PERF_H * 1.5
 
     def test_legacy_patch_radius_still_works(self):
-        """Explicit patch_radius preserves the original square-crop contract."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
         tpl, _ = _build_perforation_template(frame, anchor, patch_radius=60)
         assert tpl is not None
-        # With explicit radius the template is square (minus edge clipping)
         assert abs(tpl.shape[0] - tpl.shape[1]) <= 1
 
     def test_auto_scaled_fallback_on_blank_roi(self):
-        """Anchor on uniform region falls back to heuristic without crash."""
         frame = np.full((FRAME_H, FRAME_W, 3), 30, dtype=np.uint8)
         tpl, _ = _build_perforation_template(frame, (600.0, 500.0))
-        # Uniform frame: Otsu produces one big "foreground", filter may
-        # accept or reject — either way we must not crash and must return
-        # a usable template via fallback or the contour itself.
         if tpl is not None:
             assert tpl.shape[0] >= 20 and tpl.shape[1] >= 20
 
     def test_detect_perf_bbox_finds_perforation(self):
-        """_detect_perf_bbox returns approximate perf dimensions."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
         bbox = _detect_perf_bbox(frame, anchor)
@@ -168,75 +179,79 @@ class TestContextualTemplate:
         assert bbox is None
 
 
-# ── Template matching ──────────────────────────────────────────────────────────
+# ── Template matching (candidates with k=1) ───────────────────────────────────
 
 class TestTemplateMatching:
 
-    def test_template_match_finds_anchor(self):
-        """Template matching on the same frame used to build the template returns a match."""
+    def test_candidates_finds_anchor(self):
+        """Top candidate on the same frame used to build the template matches the anchor."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         assert tpl is not None
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        result = _template_match_perforation(gray, tpl)
-        assert result is not None
-        cx, cy, conf = result
+        cands = _template_match_candidates(
+            gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl
+        )
+        assert cands, "Expected at least one candidate"
+        cx, cy, conf = cands[0]
         assert abs(cx - anchor[0]) < 10
         assert abs(cy - anchor[1]) < 10
         assert conf > 0.8
 
-    def test_template_match_subpixel_precision(self):
-        """Template match returns float coordinates (sub-pixel)."""
+    def test_candidates_subpixel_precision(self):
+        """Candidates return float coordinates (sub-pixel)."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        result = _template_match_perforation(gray, tpl)
-        assert result is not None
-        cx, cy, _ = result
+        cands = _template_match_candidates(
+            gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl
+        )
+        assert cands
+        cx, cy, _ = cands[0]
         assert isinstance(cx, float)
         assert isinstance(cy, float)
 
-    def test_template_match_rejects_blank_frame(self):
-        """Template matching on an all-black frame returns None (low confidence)."""
+    def test_candidates_rejects_blank_frame(self):
+        """Candidates on an all-black frame return [] under a min_confidence floor."""
         good = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(good, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(good, anchor)
         assert tpl is not None
         blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-        result = _template_match_perforation(blank, tpl)
-        assert result is None
+        cands = _template_match_candidates(
+            blank, tpl, k=1, min_confidence=0.5, anchor_in_tpl=anchor_in_tpl
+        )
+        assert cands == []
 
     def test_search_roi_prefers_nearby_perforation(self):
         """With two identical perforations, ROI search locks to the nearby one."""
-        # Build template at upper perf, then match on a frame containing
-        # both upper and lower perfs. Without ROI the global peak could
-        # land on either; with a tight ROI near the upper anchor it must
-        # pick the upper one.
         tpl_frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(tpl_frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(tpl_frame, anchor)
         two_perf_frame = make_frame([0.25, 0.75])
         gray = cv2.cvtColor(two_perf_frame, cv2.COLOR_BGR2GRAY)
-        result = _template_match_perforation(
-            gray, tpl, search_center=anchor, search_radius=100
+        cands = _template_match_candidates(
+            gray, tpl, k=1,
+            search_center=anchor, search_radius=100,
+            anchor_in_tpl=anchor_in_tpl,
         )
-        assert result is not None
-        cx, cy, _ = result
+        assert cands, "Expected a candidate within the ROI"
+        cx, cy, _ = cands[0]
         assert abs(cy - anchor[1]) < 20, f"Match drifted to neighbour perf: cy={cy}"
 
-    def test_template_match_consistent_across_identical_frames(self):
-        """Template matching on identical frames returns the same position."""
+    def test_candidates_consistent_across_identical_frames(self):
+        """Repeated matches on the same frame return the same position."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        r1 = _template_match_perforation(gray, tpl)
-        r2 = _template_match_perforation(gray, tpl)
-        assert r1 is not None and r2 is not None
-        assert abs(r1[0] - r2[0]) < 0.01
-        assert abs(r1[1] - r2[1]) < 0.01
+        c1 = _template_match_candidates(gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl)
+        c2 = _template_match_candidates(gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl)
+        assert c1 and c2
+        assert abs(c1[0][0] - c2[0][0]) < 0.01
+        assert abs(c1[0][1] - c2[0][1]) < 0.01
 
 
 # ── Multi-peak (top-K) matching ───────────────────────────────────────────────
@@ -244,7 +259,6 @@ class TestTemplateMatching:
 class TestMultiPeakMatching:
 
     def test_extract_top_k_finds_multiple_peaks(self):
-        """A synthetic correlation map with 3 clear peaks yields them ranked."""
         corr = np.zeros((200, 200), dtype=np.float32)
         peaks_expected = [(50, 50, 0.9), (150, 150, 0.7), (50, 150, 0.5)]
         for x, y, v in peaks_expected:
@@ -252,43 +266,55 @@ class TestMultiPeakMatching:
 
         peaks = _extract_top_k_peaks(corr, k=3, suppression_radius=20)
         assert len(peaks) == 3
-        # Scores descending
         scores = [p[2] for p in peaks]
         assert scores == sorted(scores, reverse=True)
-        # Top peak matches the highest synthetic value
         assert abs(peaks[0][0] - 50) < 1 and abs(peaks[0][1] - 50) < 1
         assert abs(peaks[0][2] - 0.9) < 0.01
 
     def test_extract_top_k_respects_suppression(self):
-        """Peaks closer than suppression_radius are not both returned."""
         corr = np.zeros((100, 100), dtype=np.float32)
         corr[50, 50] = 0.9
         corr[50, 55] = 0.85  # within suppression_radius=20 of first
 
         peaks = _extract_top_k_peaks(corr, k=5, suppression_radius=20)
-        # The suppressed second-peak should NOT appear as a distinct entry
         distinct_peaks = [
             p for p in peaks
             if abs(p[0] - 50) > 1 or abs(p[1] - 50) > 1
         ]
-        # None of the returned "distinct" peaks should carry 0.85 --
-        # it was suppressed because it fell inside the first peak's
-        # neighbourhood.
         for _, _, score in distinct_peaks:
             assert score < 0.85 - 0.01
 
+    def test_extract_top_k_consumes_corr_map(self):
+        """In-place suppression: the input surface is mutated (hot-path no-copy)."""
+        corr = np.zeros((100, 100), dtype=np.float32)
+        corr[50, 50] = 0.9
+        before_max = float(corr.max())
+        _extract_top_k_peaks(corr, k=1, suppression_radius=20)
+        # Peak should have been suppressed in place
+        assert float(corr.max()) < before_max
+
+    def test_extract_top_k_subpixel_survives_suppression_neighbours(self):
+        """Sub-pixel guard: a peak adjacent to a prior suppression window
+        must still return a finite integer-or-refined location, not NaN."""
+        corr = np.zeros((100, 100), dtype=np.float32)
+        corr[20, 20] = 0.9  # first peak
+        corr[20, 42] = 0.7  # second peak; its x=41 neighbour will be poisoned
+                             # by the first peak's suppression window (radius=20)
+        peaks = _extract_top_k_peaks(corr, k=2, suppression_radius=20)
+        assert len(peaks) >= 2
+        for sx, sy, _ in peaks:
+            assert np.isfinite(sx) and np.isfinite(sy)
+
     def test_template_match_candidates_returns_both_perfs(self):
-        """On a frame with two identical perfs, candidates contain both."""
         tpl_frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(tpl_frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(tpl_frame, anchor)
         two_perf = make_frame([0.25, 0.75])
         gray = cv2.cvtColor(two_perf, cv2.COLOR_BGR2GRAY)
 
         candidates = _template_match_candidates(
-            gray, tpl, k=5, min_confidence=0.3
+            gray, tpl, k=5, min_confidence=0.3, anchor_in_tpl=anchor_in_tpl,
         )
-        # Need at least two high-confidence candidates near the two perfs
         upper = _perf_centroid(0.25)
         lower = _perf_centroid(0.75)
         matched_upper = any(
@@ -304,13 +330,12 @@ class TestMultiPeakMatching:
         )
 
     def test_template_match_candidates_empty_on_blank_frame(self):
-        """A blank frame below min_confidence returns an empty candidate list."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(frame, anchor)
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         candidates = _template_match_candidates(
-            blank, tpl, k=5, min_confidence=0.5
+            blank, tpl, k=5, min_confidence=0.5, anchor_in_tpl=anchor_in_tpl,
         )
         assert candidates == []
 
@@ -321,17 +346,41 @@ class TestRankingAndAmbiguity:
 
     def test_motion_predictor_smooths_delta(self):
         p = _MotionPredictor(initial_pos=(100.0, 200.0), alpha=0.5)
-        p.update((110.0, 200.0))  # delta (10, 0)
-        p.update((120.0, 200.0))  # delta (10, 0) again
+        p.update((110.0, 200.0))
+        p.update((120.0, 200.0))
         px, py = p.predict()
         assert 125.0 <= px <= 135.0
         assert abs(py - 200.0) < 1e-6
+
+    def test_motion_predictor_alpha_one_tracks_last_delta_only(self):
+        """alpha=1.0 disables EMA: delta is always last frame's delta."""
+        p = _MotionPredictor(initial_pos=(0.0, 0.0), alpha=1.0)
+        p.update((10.0, 0.0))  # delta = 10
+        p.update((10.0, 0.0))  # no motion → delta becomes 0
+        px, _ = p.predict()
+        assert abs(px - 10.0) < 1e-6
+
+    def test_motion_predictor_alpha_zero_never_updates_delta(self):
+        """alpha=0.0 freezes delta at its initial (0, 0) value."""
+        p = _MotionPredictor(initial_pos=(0.0, 0.0), alpha=0.0)
+        p.update((10.0, 0.0))
+        p.update((20.0, 0.0))
+        assert p.delta == (0.0, 0.0)
+        px, _ = p.predict()
+        # last_pos updates but delta stays zero, so predict ≡ last_pos
+        assert abs(px - 20.0) < 1e-6
+
+    def test_motion_predictor_bootstrap_before_first_update(self):
+        """Before any update, predict() returns the initial_pos exactly."""
+        p = _MotionPredictor(initial_pos=(42.0, 17.0), alpha=0.5)
+        px, py = p.predict()
+        assert (px, py) == (42.0, 17.0)
 
     def test_predictor_update_preserves_ema(self):
         p = _MotionPredictor(initial_pos=(0.0, 0.0), alpha=0.5)
         p.update((10.0, 0.0))
         first_delta = p.delta
-        p.update((10.0, 0.0))  # no new movement
+        p.update((10.0, 0.0))
         assert abs(p.delta[0]) <= abs(first_delta[0]) + 1e-6
 
     def test_closer_candidate_wins_with_similar_ncc(self):
@@ -343,7 +392,7 @@ class TestRankingAndAmbiguity:
 
     def test_higher_ncc_wins_equidistant(self):
         candidates = [(100, 100, 0.95), (100, 300, 0.60)]
-        predicted = (100, 200)  # equidistant
+        predicted = (100, 200)
         ranked, _ = _rank_candidates(candidates, predicted, perf_spacing=200)
         assert ranked[0][2] == 0.95
 
@@ -363,9 +412,25 @@ class TestRankingAndAmbiguity:
         assert ranked == []
         assert not ambiguous
 
-    def test_detect_perf_spacing_finds_two_perfs(self):
-        frame = make_frame([0.25, 0.55])  # two perfs, spacing = 0.30 * 1000 = 300
-        anchor = _perf_centroid(0.25)
+    def test_rank_candidates_with_none_perf_spacing(self):
+        """perf_spacing=None falls back to NCC-only ranking; never flags ambiguity."""
+        candidates = [(100, 100, 0.88), (100, 300, 0.90)]
+        ranked, ambiguous = _rank_candidates(candidates, (0, 0), perf_spacing=None)
+        assert len(ranked) == 2
+        assert ranked[0][2] == 0.90
+        assert not ambiguous
+
+    def test_rank_candidates_duplicate_positions_are_index_distinct(self):
+        """Two candidates sharing coords (e.g. rounding edge cases) don't collapse
+        into one via float-equality self-skip in the dominance loop."""
+        candidates = [(100.0, 100.0, 0.90), (100.0, 100.0, 0.80)]
+        ranked, _ = _rank_candidates(candidates, (100.0, 100.0), perf_spacing=200)
+        # Both entries preserved (index-based self-skip)
+        assert len(ranked) == 2
+
+    def test_detect_perf_spacing_finds_three_perfs(self):
+        frame = make_frame(TRI_PERF)  # spacing ~ 300 px
+        anchor = _perf_centroid(0.5)
         spacing = _detect_perf_spacing(frame, anchor)
         assert spacing is not None
         assert 250 <= spacing <= 350
@@ -376,70 +441,69 @@ class TestRankingAndAmbiguity:
         spacing = _detect_perf_spacing(frame, anchor)
         assert spacing is None
 
+    def test_detect_perf_spacing_returns_none_when_only_two_perfs(self):
+        """Two perfs give one delta — not enough signal to call it periodic."""
+        frame = make_frame([0.3, 0.7])
+        anchor = _perf_centroid(0.3)
+        spacing = _detect_perf_spacing(frame, anchor)
+        assert spacing is None
 
-# ── Rotation estimation ───────────────────────────────────────────────────────
+    def test_detect_perf_spacing_rejects_spacing_below_1_5_perf_h(self):
+        """Median delta below 1.5 * perf_h is rejected (contour fragments, not perfs)."""
+        # PERF_H = 100 → 1.5 * perf_h = 150. Place three perfs 120 px apart
+        # in absolute pixel terms (fractions tuned for FRAME_H=1000).
+        frame = make_frame([0.3, 0.42, 0.54])  # deltas ~120 px < 150
+        anchor = _perf_centroid(0.3)
+        spacing = _detect_perf_spacing(frame, anchor)
+        assert spacing is None
 
-class TestRotationEstimation:
 
-    def test_estimate_rotation_returns_near_zero_for_unrotated(self):
-        """An unrotated frame matched against its own template gives ~0 degrees."""
-        frame = make_frame([0.25])
-        anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(frame, anchor)
-        assert tpl is not None
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        angle = _estimate_rotation(gray, tpl, anchor[0], anchor[1])
-        assert abs(angle) < 0.5
+# ── _locate_anchor_in_frame integration ──────────────────────────────────────
 
-    def test_estimate_rotation_detects_small_rotation(self):
-        """A slightly rotated frame produces a non-zero angle estimate."""
-        frame = make_frame([0.25])
-        anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(frame, anchor)
-        assert tpl is not None
+class TestLocateAnchorInFrame:
+    def _setup(self):
+        frame = _tri_frame()
+        anchor = _tri_anchor()
+        tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
+        predictor = _MotionPredictor(initial_pos=anchor, alpha=0.6)
+        perf_spacing = _detect_perf_spacing(frame, anchor)
+        assert perf_spacing is not None
+        search_radius = int(min(max(perf_spacing * 0.45, 80), perf_spacing - 40))
+        return frame, tpl, anchor_in_tpl, predictor, search_radius, perf_spacing
 
-        h, w = frame.shape[:2]
-        R = cv2.getRotationMatrix2D((w / 2, h / 2), 1.0, 1.0)
-        rotated = cv2.warpAffine(frame, R, (w, h))
+    def test_success_branch_returns_pt_near_anchor(self):
+        frame, tpl, a_in_tpl, pred, sr, ps = self._setup()
+        outcome = _locate_anchor_in_frame(frame, tpl, a_in_tpl, pred, sr, ps)
+        assert isinstance(outcome, _FrameOutcome)
+        assert outcome.pt is not None
+        assert not outcome.ambiguous
+        assert not outcome.motion_rejected
+        cx, cy = outcome.pt
+        anchor = _tri_anchor()
+        assert abs(cx - anchor[0]) < 10
+        assert abs(cy - anchor[1]) < 10
 
-        rotated_gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
-        tm_result = _template_match_perforation(rotated_gray, tpl)
-        if tm_result is not None:
-            cx, cy, _ = tm_result
-            angle = _estimate_rotation(rotated_gray, tpl, cx, cy)
-            assert isinstance(angle, float)
+    def test_motion_rejected_branch_on_blank_frame(self):
+        _, tpl, a_in_tpl, pred, sr, ps = self._setup()
+        blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        outcome = _locate_anchor_in_frame(blank, tpl, a_in_tpl, pred, sr, ps)
+        assert outcome.pt is None
+        assert outcome.motion_rejected
+        assert not outcome.ambiguous
 
-    def test_estimate_rotation_returns_none_on_failure(self):
-        """Blank frame returns None so caller can carry previous angle."""
-        frame = make_frame([0.25])
-        anchor = _perf_centroid(0.25)
-        tpl, _ = _build_perforation_template(frame, anchor)
-        blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-        angle = _estimate_rotation(blank, tpl, 50.0, 250.0)
-        assert angle is None or angle == 0.0
 
-    def test_rotation_template_scales_to_frame_height(self):
-        """Rotation template uses ~30% of frame height for lever-arm accuracy."""
-        frame = make_frame([0.25])  # FRAME_H = 1000
-        anchor = _perf_centroid(0.25)
-        rot_tpl = _build_rotation_template(frame, anchor)
-        assert rot_tpl is not None
-        # half_h should be >= 0.3 * 1000 = 300, so template height >= 600
-        # (or clipped by frame bounds)
-        assert rot_tpl.shape[0] >= 300, (
-            f"Expected rotation template height >= 300 (30% of 1000), "
-            f"got {rot_tpl.shape[0]}"
-        )
+# ── Search radius invariant ───────────────────────────────────────────────────
 
-    def test_rotation_template_caps_half_h(self):
-        """Rotation template half-height is capped so ECC memory stays bounded."""
-        # Synthesise a huge frame to verify the cap kicks in
-        frame = np.zeros((6000, 2000, 3), dtype=np.uint8)
-        cv2.rectangle(frame, (100, 2900), (200, 3100), (240, 240, 240), -1)
-        rot_tpl = _build_rotation_template(frame, (150.0, 3000.0))
-        assert rot_tpl is not None
-        # Cap is half_h <= 1000, so full template height <= 2000
-        assert rot_tpl.shape[0] <= 2000
+class TestSearchRadiusInvariant:
+    @pytest.mark.parametrize("perf_spacing", [200, 240, 300, 400, 800])
+    def test_search_radius_strictly_less_than_spacing(self, perf_spacing):
+        """The search radius must never reach the neighbour perforation."""
+        # Mirror the production formula exactly:
+        sr = int(min(max(perf_spacing * 0.45, 80), perf_spacing - 40))
+        assert sr < perf_spacing
+        # And it must leave headroom for jitter (>= 80 px for reasonable scans,
+        # unless spacing is so tight that the upper cap forces it lower)
+        assert sr >= min(80, perf_spacing - 40)
 
 
 # ── Anchor-based stabilization workflow ────────────────────────────────────────
@@ -447,85 +511,82 @@ class TestRotationEstimation:
 class TestAnchorWorkflow:
 
     def test_stabilize_with_anchor_produces_output(self):
-        """stabilize_folder with anchor and 5 identical frames produces 5 output images."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.25])
+            good = _tri_frame()
             for i in range(5):
                 _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
 
-            anchor = _perf_centroid(0.25)
-            stabilize_folder(inp, out, anchor=anchor, jpeg_quality=95)
+            stabilize_folder(inp, out, anchor=_tri_anchor(), jpeg_quality=95)
 
             out_images = [f for f in os.listdir(out) if f.endswith(".jpg")]
             assert len(out_images) == 5
 
     def test_stabilize_produces_report(self):
-        """stabilize_folder writes a stabilization_report.txt."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.25])
-            _write_frame(os.path.join(inp, "frame_001.jpg"), good)
+            _write_frame(os.path.join(inp, "frame_001.jpg"), _tri_frame())
 
-            anchor = _perf_centroid(0.25)
-            stabilize_folder(inp, out, anchor=anchor, jpeg_quality=95)
+            stabilize_folder(inp, out, anchor=_tri_anchor(), jpeg_quality=95)
 
             report = os.path.join(out, "stabilization_report.txt")
             assert os.path.exists(report)
             content = open(report).read()
             assert "total_frames" in content
-            assert "film_format" not in content  # removed
+            assert "film_format" not in content
 
     def test_stabilize_single_frame(self):
-        """Single-frame input produces one output image."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.25])
-            _write_frame(os.path.join(inp, "single.jpg"), good)
+            _write_frame(os.path.join(inp, "single.jpg"), _tri_frame())
 
-            anchor = _perf_centroid(0.25)
-            stabilize_folder(inp, out, anchor=anchor, jpeg_quality=95)
+            stabilize_folder(inp, out, anchor=_tri_anchor(), jpeg_quality=95)
 
             out_images = [f for f in os.listdir(out) if f.endswith(".jpg")]
             assert len(out_images) == 1
 
     def test_stabilize_raises_without_anchor(self):
-        """stabilize_folder raises ValueError when anchor is None."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.25])
-            _write_frame(os.path.join(inp, "frame.jpg"), good)
+            _write_frame(os.path.join(inp, "frame.jpg"), _tri_frame())
 
             with pytest.raises(ValueError, match="anchor"):
                 stabilize_folder(inp, out, anchor=None, jpeg_quality=95)
 
     def test_stabilize_no_images_raises(self):
-        """Empty folder raises RuntimeError."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            anchor = (100.0, 200.0)
             with pytest.raises(RuntimeError, match="imágenes"):
-                stabilize_folder(inp, out, anchor=anchor, jpeg_quality=95)
+                stabilize_folder(inp, out, anchor=(100.0, 200.0), jpeg_quality=95)
+
+    def test_stabilize_raises_when_perf_spacing_undetectable(self):
+        """Single-perforation frames can't yield a spacing estimate → raise."""
+        with tempfile.TemporaryDirectory() as inp, \
+             tempfile.TemporaryDirectory() as out:
+
+            _write_frame(os.path.join(inp, "frame.jpg"), make_frame([0.5]))
+            with pytest.raises(RuntimeError, match="espaciado"):
+                stabilize_folder(
+                    inp, out, anchor=_perf_centroid(0.5), jpeg_quality=95
+                )
 
     def test_stabilize_identical_frames_zero_drift(self):
-        """Template match on identical frames returns positions close to anchor (dx/dy ~ 0)."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.25])
+            good = _tri_frame()
             for i in range(3):
                 _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
 
-            anchor = _perf_centroid(0.25)
+            anchor = _tri_anchor()
             summary = stabilize_folder(inp, out, anchor=anchor, jpeg_quality=95)
 
             assert summary["failed_detections"] == 0
-            # Target should be the anchor itself
             assert abs(summary["target_x"] - anchor[0]) < 1
             assert abs(summary["target_y"] - anchor[1]) < 1
 
@@ -535,19 +596,18 @@ class TestAnchorWorkflow:
 class TestDebugFrames:
 
     def test_debug_jpeg_created_for_failed_frame(self):
-        """Failed detection (all-black frame) produces a _debug.jpg when debug_dir is set."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out, \
              tempfile.TemporaryDirectory() as dbg:
 
-            good = make_frame([0.25])
-            _write_frame(os.path.join(inp, "frame_001.jpg"), good)
+            _write_frame(os.path.join(inp, "frame_001.jpg"), _tri_frame())
 
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             _write_frame(os.path.join(inp, "frame_002.jpg"), bad)
 
-            anchor = _perf_centroid(0.25)
-            stabilize_folder(inp, out, anchor=anchor, debug_dir=dbg, jpeg_quality=95)
+            stabilize_folder(
+                inp, out, anchor=_tri_anchor(), debug_dir=dbg, jpeg_quality=95
+            )
 
             debug_files = os.listdir(dbg)
             assert any(
@@ -556,26 +616,24 @@ class TestDebugFrames:
             ), f"Expected debug file for frame_002, got: {debug_files}"
 
     def test_no_debug_file_for_successful_detection(self):
-        """Successful detection produces no debug files."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out, \
              tempfile.TemporaryDirectory() as dbg:
 
-            good = make_frame([0.25])
-            _write_frame(os.path.join(inp, "frame_001.jpg"), good)
+            _write_frame(os.path.join(inp, "frame_001.jpg"), _tri_frame())
 
-            anchor = _perf_centroid(0.25)
-            stabilize_folder(inp, out, anchor=anchor, debug_dir=dbg, jpeg_quality=95)
+            stabilize_folder(
+                inp, out, anchor=_tri_anchor(), debug_dir=dbg, jpeg_quality=95
+            )
 
             assert os.listdir(dbg) == [], "No debug files expected for a successful run"
 
     def test_no_debug_dir_does_not_raise(self):
-        """debug_dir=None produces no errors."""
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.25])
-            _write_frame(os.path.join(inp, "frame.jpg"), good)
+            _write_frame(os.path.join(inp, "frame.jpg"), _tri_frame())
 
-            anchor = _perf_centroid(0.25)
-            stabilize_folder(inp, out, anchor=anchor, debug_dir=None, jpeg_quality=95)
+            stabilize_folder(
+                inp, out, anchor=_tri_anchor(), debug_dir=None, jpeg_quality=95
+            )
