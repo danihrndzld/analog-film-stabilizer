@@ -146,34 +146,6 @@ def _build_perforation_template(frame, anchor, patch_radius=None):
     return template, anchor_in_tpl
 
 
-def _subpixel_refine(result, mx, my):
-    """Parabolic sub-pixel refinement around an integer correlation peak.
-
-    Returns refined (sx, sy) floats; falls back to the integer location
-    when the quadratic fit is degenerate or the peak is at the boundary.
-    """
-    rh, rw = result.shape
-    sx, sy = float(mx), float(my)
-
-    if 0 < mx < rw - 1:
-        left = float(result[my, mx - 1])
-        center = float(result[my, mx])
-        right = float(result[my, mx + 1])
-        denom = 2.0 * (2.0 * center - left - right)
-        if abs(denom) > 1e-6:
-            sx = mx + (left - right) / denom
-
-    if 0 < my < rh - 1:
-        top = float(result[my - 1, mx])
-        center = float(result[my, mx])
-        bottom = float(result[my + 1, mx])
-        denom = 2.0 * (2.0 * center - top - bottom)
-        if abs(denom) > 1e-6:
-            sy = my + (top - bottom) / denom
-
-    return sx, sy
-
-
 def _extract_top_k_peaks(corr_map, k=5, suppression_radius=None):
     """Return the top-K local maxima of a correlation map.
 
@@ -551,6 +523,15 @@ def _locate_anchor_in_frame(
 
     if ranked:
         cx, cy, _ncc, _combined = ranked[0]
+        # Motion-plausibility gate: a lone top candidate that sits more than
+        # half a perforation-spacing away from where the predictor expects us
+        # is almost certainly a neighbour-perf swap. Reject it so the
+        # predictor doesn't lock onto the wrong perforation.
+        if perf_spacing is not None:
+            px, py = predicted
+            d = float(np.hypot(cx - px, cy - py))
+            if d > 0.5 * perf_spacing:
+                return _FrameOutcome(None, False, True, ranked, predicted)
         return _FrameOutcome((cx, cy), False, False, ranked, predicted)
 
     return _FrameOutcome(None, False, True, ranked, predicted)
@@ -680,12 +661,14 @@ def stabilize_folder(
                 # update the predictor (see _locate_anchor_in_frame docstring).
                 points.append(outcome.pt)
             elif outcome.motion_rejected:
+                # Motion-plausibility gate rejection OR empty ROI. Neighbours
+                # will interpolate this frame; the predictor is NOT updated
+                # and this does NOT count as a failed detection (the three
+                # counters — ambiguous, motion_rejected, failures — are
+                # disjoint by design).
                 motion_rejected_count += 1
                 points.append(None)
-                failures += 1
-                log(
-                    f"Sin detección dentro del rango de búsqueda: {os.path.basename(f)}"
-                )
+                log(f"Rechazada por movimiento (fuera de rango): {os.path.basename(f)}")
             elif outcome.pt is not None:
                 predictor.update(outcome.pt)
                 points.append(outcome.pt)

@@ -491,6 +491,28 @@ class TestLocateAnchorInFrame:
         assert outcome.motion_rejected
         assert not outcome.ambiguous
 
+    def test_motion_gate_rejects_candidate_far_from_prediction(self):
+        """Unit 6 gate: a lone top candidate further than 0.5×perf_spacing
+        from the predictor must be rejected as motion_rejected so the
+        predictor never locks onto a neighbour-perf swap."""
+        frame, tpl, a_in_tpl, _pred, _sr, ps = self._setup()
+        # Place the predictor at the top of the frame, far above every
+        # perforation. The nearest real perf (top one, at 0.2×FRAME_H) is
+        # > 0.5×perf_spacing away. Widen search_radius so the ROI still
+        # covers that perf; otherwise we'd hit the empty-ROI branch.
+        top_perf_y = int(TRI_PERF[0] * FRAME_H)  # truth: top perforation
+        assert top_perf_y > 0.5 * ps, "test setup invariant"
+        off_predictor = _MotionPredictor(initial_pos=(_tri_anchor()[0], 0.0), alpha=0.6)
+        wide_sr = top_perf_y + 40  # covers the perf; still > 0.5×ps from predictor
+        outcome = _locate_anchor_in_frame(
+            frame, tpl, a_in_tpl, off_predictor, wide_sr, ps
+        )
+        assert outcome.motion_rejected
+        assert outcome.pt is None
+        assert not outcome.ambiguous
+        # Predictor state must not have been nudged by a rejected candidate.
+        assert off_predictor.predict() == (_tri_anchor()[0], 0.0)
+
 
 # ── Search radius invariant ───────────────────────────────────────────────────
 
