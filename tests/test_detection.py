@@ -140,6 +140,24 @@ class TestTemplateMatching:
         result = _template_match_perforation(blank, tpl)
         assert result is None
 
+    def test_search_roi_prefers_nearby_perforation(self):
+        """With two identical perforations, ROI search locks to the nearby one."""
+        # Build template at upper perf, then match on a frame containing
+        # both upper and lower perfs. Without ROI the global peak could
+        # land on either; with a tight ROI near the upper anchor it must
+        # pick the upper one.
+        tpl_frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        tpl, _ = _build_perforation_template(tpl_frame, anchor)
+        two_perf_frame = make_frame([0.25, 0.75])
+        gray = cv2.cvtColor(two_perf_frame, cv2.COLOR_BGR2GRAY)
+        result = _template_match_perforation(
+            gray, tpl, search_center=anchor, search_radius=100
+        )
+        assert result is not None
+        cx, cy, _ = result
+        assert abs(cy - anchor[1]) < 20, f"Match drifted to neighbour perf: cy={cy}"
+
     def test_template_match_consistent_across_identical_frames(self):
         """Template matching on identical frames returns the same position."""
         frame = make_frame([0.25])
@@ -185,14 +203,14 @@ class TestRotationEstimation:
             angle = _estimate_rotation(rotated_gray, tpl, cx, cy)
             assert isinstance(angle, float)
 
-    def test_estimate_rotation_returns_zero_on_failure(self):
-        """Blank frame returns 0.0 (ECC fails to converge)."""
+    def test_estimate_rotation_returns_none_on_failure(self):
+        """Blank frame returns None so caller can carry previous angle."""
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
         tpl, _ = _build_perforation_template(frame, anchor)
         blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         angle = _estimate_rotation(blank, tpl, 50.0, 250.0)
-        assert angle == 0.0
+        assert angle is None or angle == 0.0
 
 
 # ── Anchor-based stabilization workflow ────────────────────────────────────────

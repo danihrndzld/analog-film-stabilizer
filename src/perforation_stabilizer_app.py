@@ -84,11 +84,22 @@ def _build_perforation_template(frame, anchor, patch_radius=60):
     return template, (x0, y0)
 
 
-def _template_match_perforation(gray, template, min_confidence=0.4):
+def _template_match_perforation(
+    gray,
+    template,
+    min_confidence=0.4,
+    search_center=None,
+    search_radius=None,
+):
     """Locate the anchor point in a frame using normalized cross-correlation.
 
     Uses cv2.matchTemplate with TM_CCOEFF_NORMED and parabolic sub-pixel
     refinement on the correlation peak.
+
+    When ``search_center`` and ``search_radius`` are provided, matching is
+    restricted to an ROI around the expected position. This prevents the
+    global NCC peak from locking onto a neighbouring (near-identical)
+    perforation.
 
     Parameters
     ----------
@@ -98,6 +109,13 @@ def _template_match_perforation(gray, template, min_confidence=0.4):
         Grayscale template patch.
     min_confidence : float
         Minimum NCC score to accept the match (0.0-1.0).
+    search_center : tuple(float, float) or None
+        Expected (x, y) position of the anchor in frame coordinates. When
+        given, search is limited to a box of radius ``search_radius``.
+    search_radius : int or None
+        Half-size (px) of the search box around ``search_center``. If the
+        resulting ROI cannot contain the template, falls back to a full
+        search.
 
     Returns
     -------
@@ -107,16 +125,36 @@ def _template_match_perforation(gray, template, min_confidence=0.4):
     """
 
     th, tw = template.shape[:2]
-    if gray.shape[0] < th or gray.shape[1] < tw:
+    h, w = gray.shape[:2]
+    if h < th or w < tw:
         return None
 
-    result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+    roi_x0 = 0
+    roi_y0 = 0
+    roi = gray
+
+    if search_center is not None and search_radius is not None:
+        sx_c, sy_c = search_center
+        if np.isfinite(sx_c) and np.isfinite(sy_c):
+            # Expand ROI by template half-size so the template fits around
+            # the expected centre on all sides.
+            rx = int(search_radius) + tw // 2
+            ry = int(search_radius) + th // 2
+            x0 = max(0, int(sx_c) - rx)
+            y0 = max(0, int(sy_c) - ry)
+            x1 = min(w, int(sx_c) + rx)
+            y1 = min(h, int(sy_c) + ry)
+            if x1 - x0 >= tw and y1 - y0 >= th:
+                roi_x0, roi_y0 = x0, y0
+                roi = gray[y0:y1, x0:x1]
+
+    result = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
     if max_val < min_confidence:
         return None
 
-    mx, my = max_loc  # top-left of best match (integer)
+    mx, my = max_loc  # top-left of best match within ROI (integer)
 
     # Sub-pixel refinement via parabolic interpolation on the correlation surface
     rh, rw = result.shape
@@ -138,49 +176,72 @@ def _template_match_perforation(gray, template, min_confidence=0.4):
         if abs(denom) > 1e-6:
             sy = my + (top - bottom) / denom
 
-    # Convert from match top-left to template center
-    cx = sx + tw / 2.0
-    cy = sy + th / 2.0
+    # Convert from ROI match top-left to template center in frame coords
+    cx = roi_x0 + sx + tw / 2.0
+    cy = roi_y0 + sy + th / 2.0
 
     return (cx, cy, max_val)
+
+
+def _build_rotation_template(frame, anchor, half_w=60, half_h=150):
+    """Extract a taller grayscale strip around the anchor for rotation ECC.
+
+    A taller crop gives ECC more vertical lever arm, so sub-tenth-degree
+    rotation is estimated more stably than from a square patch.
+    """
+    h, w = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    cx, cy = anchor
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return None
+
+    x0 = max(0, int(cx - half_w))
+    y0 = max(0, int(cy - half_h))
+    x1 = min(w, int(cx + half_w))
+    y1 = min(h, int(cy + half_h))
+
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return None
+
+    return gray[y0:y1, x0:x1].copy()
 
 
 def _estimate_rotation(gray, template, cx, cy):
     """Estimate small rotation angle of the anchor region using ECC.
 
-    Uses cv2.findTransformECC with MOTION_EUCLIDEAN (translation + rotation)
-    on a tight crop around the template-matched position.  Returns the rotation
-    angle in degrees, or 0.0 if ECC fails to converge.
+    Uses cv2.findTransformECC with MOTION_EUCLIDEAN (translation + rotation).
+    ``template`` should typically be a tall strip around the anchor (see
+    ``_build_rotation_template``) so ECC has vertical lever arm.
 
     Parameters
     ----------
     gray : np.ndarray
         Grayscale frame.
     template : np.ndarray
-        Grayscale template patch.
+        Grayscale reference crop (commonly the rotation strip).
     cx, cy : float
-        Template-matched center position in frame coordinates.
+        Template-matched center position of the anchor in frame coordinates.
 
     Returns
     -------
-    float
-        Rotation angle in degrees (positive = counter-clockwise).
+    float or None
+        Rotation angle in degrees (positive = counter-clockwise), or None
+        when ECC cannot be computed (out of bounds, convergence failure).
     """
     h, w = gray.shape[:2]
 
     th, tw = template.shape[:2]
-    # Extract the matched region from the current frame
-    x0 = max(0, int(cx - tw / 2))
-    y0 = max(0, int(cy - th / 2))
-    x1 = min(w, x0 + tw)
-    y1 = min(h, y0 + th)
+    x0 = int(round(cx - tw / 2.0))
+    y0 = int(round(cy - th / 2.0))
+    x1 = x0 + tw
+    y1 = y0 + th
 
-    if x1 - x0 != tw or y1 - y0 != th:
-        return 0.0
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        return None
 
     patch = gray[y0:y1, x0:x1]
 
-    # ECC with EUCLIDEAN model (translation + rotation)
     warp_matrix = np.eye(2, 3, dtype=np.float32)
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-4)
 
@@ -192,12 +253,11 @@ def _estimate_rotation(gray, template, cx, cy):
             cv2.MOTION_EUCLIDEAN,
             criteria,
         )
-        # Extract rotation angle from the 2×3 matrix
         # For EUCLIDEAN: [[cos θ, -sin θ, tx], [sin θ, cos θ, ty]]
         angle_rad = np.arctan2(warp_matrix[1, 0], warp_matrix[0, 0])
         return float(np.degrees(angle_rad))
     except cv2.error:
-        return 0.0
+        return None
 
 
 def stabilize_folder(
@@ -276,6 +336,8 @@ def stabilize_folder(
             "Selecciona un punto con más contraste."
         )
 
+    rot_template = _build_rotation_template(first_frame, anchor)
+
     log(
         f"Plantilla construida ({template.shape[1]}×{template.shape[0]} px) "
         f"en ({anchor[0]:.0f}, {anchor[1]:.0f})"
@@ -288,23 +350,47 @@ def stabilize_folder(
     # ── Phase 2: Detect anchor position in all frames via template matching ──
     log("Fase 2: alineando frames...")
 
+    # Tracking state: seed search at the user anchor; update as we find matches.
+    # ROI search keeps NCC from locking onto an adjacent perforation. The
+    # motion-prior threshold rejects implausible jumps (also typically a
+    # neighbouring perf) and forces the position through the interpolation
+    # fallback.
+    search_radius = 220  # px; covers realistic frame-to-frame drift
+    max_jump = 180  # px; above this, treat match as neighbouring perf
+    last_pos = (float(anchor[0]), float(anchor[1]))
+
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
         if frame is None:
             points.append(None)
-            angles.append(0.0)
+            angles.append(None)
             failures += 1
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
             pt = None
-            angle = 0.0
+            angle = None
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            tm_result = _template_match_perforation(gray, template, min_confidence=0.4)
+            tm_result = _template_match_perforation(
+                gray,
+                template,
+                min_confidence=0.4,
+                search_center=last_pos,
+                search_radius=search_radius,
+            )
             if tm_result is not None:
-                cx, cy, conf = tm_result
-                pt = (cx, cy)
-                angle = _estimate_rotation(gray, template, cx, cy)
+                cx, cy, _conf = tm_result
+                jump = ((cx - last_pos[0]) ** 2 + (cy - last_pos[1]) ** 2) ** 0.5
+                if jump > max_jump:
+                    log(
+                        f"Salto implausible ({jump:.0f}px) en "
+                        f"{os.path.basename(f)}; se interpolará."
+                    )
+                else:
+                    pt = (cx, cy)
+                    last_pos = pt
+                    if rot_template is not None:
+                        angle = _estimate_rotation(gray, rot_template, cx, cy)
 
             points.append(pt)
             angles.append(angle)
@@ -353,6 +439,27 @@ def stabilize_folder(
         ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
     per_frame = list(zip(xs.tolist(), ys.tolist(), strict=True))
 
+    # Interpolate missing angles (ECC failures, out-of-bounds) then smooth.
+    # Raw per-frame ECC on a small patch is noisy at the sub-tenth-degree
+    # scale; without smoothing that noise warps every frame slightly.
+    ang = np.array(
+        [a if a is not None else np.nan for a in angles], dtype=np.float32
+    )
+    idx_a = np.arange(len(ang))
+    good_a = np.isfinite(ang)
+    if np.any(good_a):
+        ang[~good_a] = np.interp(idx_a[~good_a], idx_a[good_a], ang[good_a])
+    else:
+        ang[:] = 0.0
+    k = smooth_radius * 2 + 1
+    kernel = np.ones(k, dtype=np.float32) / k
+    ang_smoothed = np.convolve(
+        np.pad(ang, (smooth_radius, smooth_radius), mode="edge"),
+        kernel,
+        mode="valid",
+    )
+    per_frame_angles = ang_smoothed.tolist()
+
     log("Segunda pasada: estabilizando y guardando...")
 
     cv_border = _BORDER_MODES.get(border_mode, cv2.BORDER_REPLICATE)
@@ -369,7 +476,9 @@ def stabilize_folder(
             pt = per_frame[i - 1]
             dx = target_x - pt[0]
             dy = target_y - pt[1]
-            angle = angles[i - 1] if i - 1 < len(angles) else 0.0
+            angle = (
+                per_frame_angles[i - 1] if i - 1 < len(per_frame_angles) else 0.0
+            )
 
             # Build rotation + translation matrix.
             # Rotate around the detected position to correct in-gate tilt,
