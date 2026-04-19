@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from perforation_stabilizer_app import (
     _build_perforation_template,
+    _build_rotation_template,
     _detect_perf_bbox,
     _estimate_rotation,
     _extract_top_k_peaks,
@@ -351,6 +352,29 @@ class TestRotationEstimation:
         blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         angle = _estimate_rotation(blank, tpl, 50.0, 250.0)
         assert angle is None or angle == 0.0
+
+    def test_rotation_template_scales_to_frame_height(self):
+        """Rotation template uses ~30% of frame height for lever-arm accuracy."""
+        frame = make_frame([0.25])  # FRAME_H = 1000
+        anchor = _perf_centroid(0.25)
+        rot_tpl = _build_rotation_template(frame, anchor)
+        assert rot_tpl is not None
+        # half_h should be >= 0.3 * 1000 = 300, so template height >= 600
+        # (or clipped by frame bounds)
+        assert rot_tpl.shape[0] >= 300, (
+            f"Expected rotation template height >= 300 (30% of 1000), "
+            f"got {rot_tpl.shape[0]}"
+        )
+
+    def test_rotation_template_caps_half_h(self):
+        """Rotation template half-height is capped so ECC memory stays bounded."""
+        # Synthesise a huge frame to verify the cap kicks in
+        frame = np.zeros((6000, 2000, 3), dtype=np.uint8)
+        cv2.rectangle(frame, (100, 2900), (200, 3100), (240, 240, 240), -1)
+        rot_tpl = _build_rotation_template(frame, (150.0, 3000.0))
+        assert rot_tpl is not None
+        # Cap is half_h <= 1000, so full template height <= 2000
+        assert rot_tpl.shape[0] <= 2000
 
 
 # ── Anchor-based stabilization workflow ────────────────────────────────────────

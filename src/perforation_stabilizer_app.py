@@ -420,11 +420,16 @@ def _template_match_perforation(
     return (cx, cy, max_val)
 
 
-def _build_rotation_template(frame, anchor, half_w=60, half_h=150):
-    """Extract a taller grayscale strip around the anchor for rotation ECC.
+def _build_rotation_template(frame, anchor, half_w=None, half_h=None):
+    """Extract a tall grayscale strip around the anchor for rotation ECC.
 
     A taller crop gives ECC more vertical lever arm, so sub-tenth-degree
-    rotation is estimated more stably than from a square patch.
+    rotation is estimated more stably than from a square patch. When
+    ``half_h`` is None, it is auto-scaled to ~30% of the frame height
+    (capped at 1000 px to bound ECC memory) so high-resolution scans
+    (e.g. 4056×3040) get meaningful rotational resolution instead of the
+    legacy 300-px strip. ``half_w`` defaults to the detected perforation
+    width, scaling horizontal context with the scan resolution.
     """
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -432,6 +437,21 @@ def _build_rotation_template(frame, anchor, half_w=60, half_h=150):
     cx, cy = anchor
     if not (np.isfinite(cx) and np.isfinite(cy)):
         return None
+
+    if half_h is None:
+        half_h = int(min(1000, max(150, h * 0.3)))
+    else:
+        half_h = int(half_h)
+
+    if half_w is None:
+        bbox = _detect_perf_bbox(frame, anchor)
+        if bbox is not None:
+            perf_w, _ = bbox
+            half_w = max(60, int(perf_w * 0.6))
+        else:
+            half_w = 60
+    else:
+        half_w = int(half_w)
 
     x0 = max(0, int(cx - half_w))
     y0 = max(0, int(cy - half_h))
