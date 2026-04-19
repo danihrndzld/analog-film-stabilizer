@@ -292,10 +292,16 @@ window.api.onDone((summary) => {
   setRunning(false);
   setProgress(1);
   progressFill.classList.add('is-done');
-  addLog(
-    `Listo — ${summary.total_frames} frames · ${summary.failed_detections} sin detección · salida: ${summary.output_width}×${summary.output_height} px`,
-    'success'
-  );
+  const ambiguous = summary.ambiguous_frames ?? 0;
+  const rejected = summary.motion_rejected_frames ?? 0;
+  const parts = [
+    `${summary.total_frames} frames`,
+    `${summary.failed_detections} sin detección`,
+  ];
+  if (ambiguous > 0) parts.push(`${ambiguous} ambiguos`);
+  if (rejected > 0 && rejected !== ambiguous) parts.push(`${rejected} rechazados por movimiento`);
+  parts.push(`salida: ${summary.output_width}×${summary.output_height} px`);
+  addLog(`Listo — ${parts.join(' · ')}`, 'success');
 });
 
 window.api.onError((msg) => {

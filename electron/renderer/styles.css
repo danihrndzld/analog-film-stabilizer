@@ -684,27 +684,55 @@ html, body {
 .preview-img-wrap {
   display: inline-block;
   position: relative;
+  width: 100%;
 }
 
 .preview-img {
   display: block;
-  max-height: 220px;
-  width: auto;
+  width: 100%;
+  height: auto;
   cursor: crosshair;
   border-radius: 3px;
   border: 1px solid var(--border);
 }
 
+/* Anchor area indicator — shows the template-matching region, not just a pixel */
 .anchor-dot {
   position: absolute;
-  width: 12px;
-  height: 12px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  background: var(--red);
+  background: oklch(63% 0.17 25 / 0.18);
   border: 2px solid #fff;
   transform: translate(-50%, -50%);
   pointer-events: none;
-  box-shadow: 0 0 0 1px var(--red);
+  box-shadow: 0 0 0 1px var(--red), inset 0 0 0 0 transparent;
+}
+
+/* Crosshair lines inside the anchor area */
+.anchor-dot::before,
+.anchor-dot::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.anchor-dot::before {
+  /* Horizontal crosshair */
+  width: 12px;
+  height: 1px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.anchor-dot::after {
+  /* Vertical crosshair */
+  width: 1px;
+  height: 12px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
 }
 
 .preview-hint {
