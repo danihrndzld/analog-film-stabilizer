@@ -47,8 +47,82 @@ _BORDER_MODES = {
 # ── Template matching alignment ──────────────────────────────────────────────
 
 
-def _build_perforation_template(frame, anchor, patch_radius=60):
-    """Extract a grayscale patch around the user-selected anchor point.
+def _detect_perf_bbox(frame, anchor, search_radius=None):
+    """Detect the perforation bounding box around a user-selected anchor.
+
+    Uses Otsu thresholding on a grayscale ROI around the anchor, then picks
+    the contour whose centroid is closest to the anchor (filtered by minimum
+    area and aspect ratio to reject noise).
+
+    Returns
+    -------
+    (w, h) : tuple(int, int) or None
+        Width and height in pixels of the detected perforation, or None if
+        no suitable contour is found.
+    """
+    h, w = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    cx, cy = anchor
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return None
+
+    if search_radius is None:
+        search_radius = min(h, w) // 4
+
+    x0 = max(0, int(cx - search_radius))
+    y0 = max(0, int(cy - search_radius))
+    x1 = min(w, int(cx + search_radius))
+    y1 = min(h, int(cy + search_radius))
+
+    roi = gray[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+
+    _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    contours, _ = cv2.findContours(
+        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return None
+
+    anchor_rx = cx - x0
+    anchor_ry = cy - y0
+    min_area = max(100, (search_radius * search_radius) // 400)
+
+    best = None
+    best_dist = float("inf")
+    for cnt in contours:
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        area = bw * bh
+        if area < min_area:
+            continue
+        ar = bw / max(bh, 1)
+        if ar < 0.3 or ar > 3.0:
+            continue
+        ccx = bx + bw / 2.0
+        ccy = by + bh / 2.0
+        d = (ccx - anchor_rx) ** 2 + (ccy - anchor_ry) ** 2
+        if d < best_dist:
+            best_dist = d
+            best = (bw, bh)
+
+    return best
+
+
+def _build_perforation_template(frame, anchor, patch_radius=None):
+    """Extract a tall grayscale patch around the user-selected anchor point.
+
+    When ``patch_radius`` is None (default), the template size is auto-
+    scaled to the detected perforation: width = ~1.2 × perf_w, height =
+    ~2.5 × perf_h. The vertical asymmetry captures the perforation plus
+    substantial dark film above and below — this is the context that lets
+    downstream ranking tell "upper" vs "lower" perforation apart, instead
+    of seeing two near-identical bright rectangles.
+
+    When ``patch_radius`` is an int, behaves like the legacy square crop
+    with that radius.
 
     Parameters
     ----------
@@ -56,14 +130,14 @@ def _build_perforation_template(frame, anchor, patch_radius=60):
         Full BGR frame.
     anchor : tuple(float, float)
         User-selected (x, y) in full-frame coordinates.
-    patch_radius : int
-        Radius in pixels around the anchor to extract.
+    patch_radius : int or None
+        If None, auto-scale. Otherwise use as square half-size.
 
     Returns
     -------
     (template, origin) : (np.ndarray, (int, int))
-        Grayscale template patch and the (x0, y0) origin of the patch in the frame.
-        Returns (None, None) if extraction fails.
+        Grayscale template patch and the (x0, y0) origin of the patch in the
+        frame. Returns (None, None) if extraction fails.
     """
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -72,10 +146,24 @@ def _build_perforation_template(frame, anchor, patch_radius=60):
     if not (np.isfinite(cx) and np.isfinite(cy)):
         return None, None
 
-    x0 = max(0, int(cx - patch_radius))
-    y0 = max(0, int(cy - patch_radius))
-    x1 = min(w, int(cx + patch_radius))
-    y1 = min(h, int(cy + patch_radius))
+    if patch_radius is None:
+        bbox = _detect_perf_bbox(frame, anchor)
+        if bbox is not None:
+            perf_w, perf_h = bbox
+            half_w = max(10, int(perf_w * 0.6))
+            half_h = max(10, int(perf_h * 1.25))
+        else:
+            r = max(60, h // 10)
+            half_w = r
+            half_h = r
+    else:
+        half_w = int(patch_radius)
+        half_h = int(patch_radius)
+
+    x0 = max(0, int(cx - half_w))
+    y0 = max(0, int(cy - half_h))
+    x1 = min(w, int(cx + half_w))
+    y1 = min(h, int(cy + half_h))
 
     if x1 - x0 < 10 or y1 - y0 < 10:
         return None, None

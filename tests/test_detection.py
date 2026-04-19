@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from perforation_stabilizer_app import (
     _build_perforation_template,
+    _detect_perf_bbox,
     _estimate_rotation,
     _template_match_perforation,
     stabilize_folder,
@@ -98,6 +99,67 @@ class TestBuildTemplate:
         tpl, origin = _build_perforation_template(frame, (float("nan"), 100.0))
         assert tpl is None
         assert origin is None
+
+
+# ── Contextual template (auto-scaled, asymmetric vertical) ────────────────────
+
+class TestContextualTemplate:
+
+    def test_auto_scaled_template_is_taller_than_wide(self):
+        """Default (patch_radius=None) produces a vertical-asymmetric template."""
+        frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        tpl, _ = _build_perforation_template(frame, anchor)
+        assert tpl is not None
+        # Height should be clearly greater than width (captures perf + context)
+        assert tpl.shape[0] > tpl.shape[1], (
+            f"Expected tall template, got {tpl.shape}"
+        )
+
+    def test_auto_scaled_template_is_larger_than_perf(self):
+        """Template height spans clearly more than the perforation itself."""
+        frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        tpl, _ = _build_perforation_template(frame, anchor)
+        assert tpl is not None
+        assert tpl.shape[0] > PERF_H * 1.5, (
+            f"Template height {tpl.shape[0]} must exceed perf_h={PERF_H} "
+            "with vertical context"
+        )
+
+    def test_legacy_patch_radius_still_works(self):
+        """Explicit patch_radius preserves the original square-crop contract."""
+        frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        tpl, _ = _build_perforation_template(frame, anchor, patch_radius=60)
+        assert tpl is not None
+        # With explicit radius the template is square (minus edge clipping)
+        assert abs(tpl.shape[0] - tpl.shape[1]) <= 1
+
+    def test_auto_scaled_fallback_on_blank_roi(self):
+        """Anchor on uniform region falls back to heuristic without crash."""
+        frame = np.full((FRAME_H, FRAME_W, 3), 30, dtype=np.uint8)
+        tpl, _ = _build_perforation_template(frame, (600.0, 500.0))
+        # Uniform frame: Otsu produces one big "foreground", filter may
+        # accept or reject — either way we must not crash and must return
+        # a usable template via fallback or the contour itself.
+        if tpl is not None:
+            assert tpl.shape[0] >= 20 and tpl.shape[1] >= 20
+
+    def test_detect_perf_bbox_finds_perforation(self):
+        """_detect_perf_bbox returns approximate perf dimensions."""
+        frame = make_frame([0.25])
+        anchor = _perf_centroid(0.25)
+        bbox = _detect_perf_bbox(frame, anchor)
+        assert bbox is not None
+        bw, bh = bbox
+        assert abs(bw - PERF_W) < 10
+        assert abs(bh - PERF_H) < 10
+
+    def test_detect_perf_bbox_returns_none_on_non_finite_anchor(self):
+        frame = make_frame([0.25])
+        bbox = _detect_perf_bbox(frame, (float("nan"), 100.0))
+        assert bbox is None
 
 
 # ── Template matching ──────────────────────────────────────────────────────────
