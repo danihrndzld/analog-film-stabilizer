@@ -458,8 +458,11 @@ def _detect_perf_spacing(frame, anchor, search_radius=None):
     if search_radius is None:
         search_radius = max(perf_h * 4, h // 3)
 
-    x0 = max(0, int(cx - perf_w * 2))
-    x1 = min(w, int(cx + perf_w * 2))
+    # Narrow strip: just the perforation column. A wider strip catches bright
+    # image content (sky, highlights) and pollutes the spacing estimate.
+    half_w = max(int(perf_w * 0.6), 30)
+    x0 = max(0, int(cx - half_w))
+    x1 = min(w, int(cx + half_w))
     y0 = max(0, int(cy - search_radius))
     y1 = min(h, int(cy + search_radius))
     roi = gray[y0:y1, x0:x1]
@@ -473,13 +476,14 @@ def _detect_perf_spacing(frame, anchor, search_radius=None):
 
     centers_y = []
     target_area = perf_w * perf_h
+    target_ar = perf_w / max(perf_h, 1)
     for cnt in contours:
         bx, by, bw, bh = cv2.boundingRect(cnt)
         area = bw * bh
-        if area < 0.3 * target_area or area > 3.0 * target_area:
+        if area < 0.5 * target_area or area > 2.0 * target_area:
             continue
         ar = bw / max(bh, 1)
-        if ar < 0.3 or ar > 3.0:
+        if ar < target_ar * 0.6 or ar > target_ar * 1.6:
             continue
         centers_y.append(by + bh / 2.0)
 
