@@ -321,6 +321,182 @@ def _template_match_candidates(
     return candidates
 
 
+class _MotionPredictor:
+    """Frame-to-frame position predictor with exponential-smoothed delta.
+
+    Used by the tracking pipeline to pick the correct perforation among
+    several top-K candidates: when two candidates score similarly, the one
+    closest to ``predict()`` wins. The predictor intentionally does NOT
+    update when a frame is flagged as ambiguous, so a bad match cannot
+    contaminate future predictions (avoiding the cumulative-drift failure
+    mode where one perf swap causes every subsequent frame to follow the
+    wrong perforation).
+    """
+
+    def __init__(self, initial_pos, alpha=0.6):
+        self.last_pos = (float(initial_pos[0]), float(initial_pos[1]))
+        self.delta = (0.0, 0.0)
+        self.alpha = float(alpha)
+
+    def predict(self):
+        return (
+            self.last_pos[0] + self.delta[0],
+            self.last_pos[1] + self.delta[1],
+        )
+
+    def update(self, new_pos):
+        new_delta_x = new_pos[0] - self.last_pos[0]
+        new_delta_y = new_pos[1] - self.last_pos[1]
+        self.delta = (
+            self.alpha * new_delta_x + (1.0 - self.alpha) * self.delta[0],
+            self.alpha * new_delta_y + (1.0 - self.alpha) * self.delta[1],
+        )
+        self.last_pos = (float(new_pos[0]), float(new_pos[1]))
+
+
+def _rank_candidates(
+    candidates,
+    predicted_pos,
+    perf_spacing,
+    ambiguity_score_ratio=0.85,
+    ambiguity_spacing_tol=0.20,
+):
+    """Rank NCC candidates by combined score and flag perf-to-perf ambiguity.
+
+    Combined score per candidate:
+
+        score = ncc × exp(-distance_to_prediction / perf_spacing) × dominance
+
+    where ``dominance`` divides this candidate's NCC by the maximum NCC
+    among other candidates within ``perf_spacing`` — so a peak that stands
+    alone ranks higher than one competing against a near-identical twin.
+
+    The ambiguity flag fires when:
+      - top-2 candidates have near-equal combined scores
+        (score_2 >= ambiguity_score_ratio × score_1), AND
+      - their positions are separated by ~perf_spacing
+        (within ``ambiguity_spacing_tol``)
+
+    This is the exact signature of "NCC locked onto a neighbouring
+    perforation" — the caller should skip updating the motion predictor
+    and reuse the predicted position for the frame.
+
+    Returns
+    -------
+    (ranked, ambiguous) : (list, bool)
+        ``ranked`` is the candidate list sorted by combined score
+        descending. Each entry is ``(cx, cy, ncc, combined_score)``.
+        ``ambiguous`` is True when perf-to-perf ambiguity is detected.
+    """
+    if not candidates:
+        return [], False
+    if perf_spacing is None or perf_spacing <= 0:
+        # No spacing known: fall back to NCC-only ranking, no ambiguity
+        ranked = sorted(
+            ((cx, cy, ncc, ncc) for cx, cy, ncc in candidates),
+            key=lambda t: t[3],
+            reverse=True,
+        )
+        return list(ranked), False
+
+    px, py = predicted_pos
+    perf_spacing = float(perf_spacing)
+
+    scored = []
+    for cx, cy, ncc in candidates:
+        dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+        proximity = float(np.exp(-dist / perf_spacing))
+
+        # Dominance: compare against other candidates within perf_spacing
+        competing_ncc = 0.0
+        for ox, oy, oncc in candidates:
+            if ox == cx and oy == cy:
+                continue
+            odist = ((ox - cx) ** 2 + (oy - cy) ** 2) ** 0.5
+            if odist <= perf_spacing and oncc > competing_ncc:
+                competing_ncc = oncc
+        dominance = ncc / competing_ncc if competing_ncc > 1e-6 else 1.0
+        dominance = min(dominance, 1.0)
+
+        combined = ncc * proximity * dominance
+        scored.append((cx, cy, ncc, combined))
+
+    scored.sort(key=lambda t: t[3], reverse=True)
+
+    ambiguous = False
+    if len(scored) >= 2:
+        top = scored[0]
+        runner = scored[1]
+        if top[3] > 1e-6:
+            score_close = runner[3] >= ambiguity_score_ratio * top[3]
+        else:
+            score_close = False
+        sep = ((top[0] - runner[0]) ** 2 + (top[1] - runner[1]) ** 2) ** 0.5
+        spacing_close = (
+            abs(sep - perf_spacing) <= ambiguity_spacing_tol * perf_spacing
+        )
+        if score_close and spacing_close:
+            ambiguous = True
+
+    return scored, ambiguous
+
+
+def _detect_perf_spacing(frame, anchor, search_radius=None):
+    """Estimate vertical distance between adjacent perforations.
+
+    Scans a vertical strip centred on the anchor for Otsu-bright contours
+    whose size is similar to the anchor's perforation, and returns the
+    median vertical centroid-to-centroid spacing. Falls back to None when
+    fewer than two perforations are detected.
+    """
+    h, w = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cx, cy = anchor
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return None
+
+    bbox = _detect_perf_bbox(frame, anchor)
+    if bbox is None:
+        return None
+    perf_w, perf_h = bbox
+    if search_radius is None:
+        search_radius = max(perf_h * 4, h // 3)
+
+    x0 = max(0, int(cx - perf_w * 2))
+    x1 = min(w, int(cx + perf_w * 2))
+    y0 = max(0, int(cy - search_radius))
+    y1 = min(h, int(cy + search_radius))
+    roi = gray[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+
+    _, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(
+        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return None
+
+    centers_y = []
+    target_area = perf_w * perf_h
+    for cnt in contours:
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        area = bw * bh
+        if area < 0.3 * target_area or area > 3.0 * target_area:
+            continue
+        ar = bw / max(bh, 1)
+        if ar < 0.3 or ar > 3.0:
+            continue
+        centers_y.append(by + bh / 2.0)
+
+    if len(centers_y) < 2:
+        return None
+
+    centers_y.sort()
+    deltas = np.diff(centers_y)
+    return float(np.median(deltas))
+
+
 def _template_match_perforation(
     gray,
     template,

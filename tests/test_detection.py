@@ -15,11 +15,14 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from perforation_stabilizer_app import (
+    _MotionPredictor,
     _build_perforation_template,
     _build_rotation_template,
     _detect_perf_bbox,
+    _detect_perf_spacing,
     _estimate_rotation,
     _extract_top_k_peaks,
+    _rank_candidates,
     _template_match_candidates,
     _template_match_perforation,
     stabilize_folder,
@@ -310,6 +313,68 @@ class TestMultiPeakMatching:
             blank, tpl, k=5, min_confidence=0.5
         )
         assert candidates == []
+
+
+# ── Ranking and ambiguity ─────────────────────────────────────────────────────
+
+class TestRankingAndAmbiguity:
+
+    def test_motion_predictor_smooths_delta(self):
+        p = _MotionPredictor(initial_pos=(100.0, 200.0), alpha=0.5)
+        p.update((110.0, 200.0))  # delta (10, 0)
+        p.update((120.0, 200.0))  # delta (10, 0) again
+        px, py = p.predict()
+        assert 125.0 <= px <= 135.0
+        assert abs(py - 200.0) < 1e-6
+
+    def test_predictor_update_preserves_ema(self):
+        p = _MotionPredictor(initial_pos=(0.0, 0.0), alpha=0.5)
+        p.update((10.0, 0.0))
+        first_delta = p.delta
+        p.update((10.0, 0.0))  # no new movement
+        assert abs(p.delta[0]) <= abs(first_delta[0]) + 1e-6
+
+    def test_closer_candidate_wins_with_similar_ncc(self):
+        candidates = [(100, 100, 0.90), (100, 300, 0.88)]
+        predicted = (100, 110)
+        ranked, ambiguous = _rank_candidates(candidates, predicted, perf_spacing=200)
+        assert ranked[0][0] == 100 and ranked[0][1] == 100
+        assert not ambiguous
+
+    def test_higher_ncc_wins_equidistant(self):
+        candidates = [(100, 100, 0.95), (100, 300, 0.60)]
+        predicted = (100, 200)  # equidistant
+        ranked, _ = _rank_candidates(candidates, predicted, perf_spacing=200)
+        assert ranked[0][2] == 0.95
+
+    def test_ambiguity_flagged_on_twin_peaks(self):
+        candidates = [(100, 100, 0.90), (100, 300, 0.90)]
+        predicted = (100, 200)
+        _, ambiguous = _rank_candidates(candidates, predicted, perf_spacing=200)
+        assert ambiguous
+
+    def test_single_candidate_never_ambiguous(self):
+        candidates = [(100, 100, 0.90)]
+        _, ambiguous = _rank_candidates(candidates, (100, 100), perf_spacing=200)
+        assert not ambiguous
+
+    def test_empty_candidates_returns_empty(self):
+        ranked, ambiguous = _rank_candidates([], (0, 0), perf_spacing=200)
+        assert ranked == []
+        assert not ambiguous
+
+    def test_detect_perf_spacing_finds_two_perfs(self):
+        frame = make_frame([0.25, 0.55])  # two perfs, spacing = 0.30 * 1000 = 300
+        anchor = _perf_centroid(0.25)
+        spacing = _detect_perf_spacing(frame, anchor)
+        assert spacing is not None
+        assert 250 <= spacing <= 350
+
+    def test_detect_perf_spacing_returns_none_when_only_one_perf(self):
+        frame = make_frame([0.5])
+        anchor = _perf_centroid(0.5)
+        spacing = _detect_perf_spacing(frame, anchor)
+        assert spacing is None
 
 
 # ── Rotation estimation ───────────────────────────────────────────────────────
