@@ -735,7 +735,6 @@ def stabilize_folder(
         os.makedirs(debug_dir, exist_ok=True)
 
     points = []
-    angles = []  # per-frame rotation angles (degrees)
     failures = 0
     total = len(files)
 
@@ -763,8 +762,6 @@ def stabilize_folder(
             f"No pude extraer plantilla en el punto ({anchor[0]:.0f}, {anchor[1]:.0f}). "
             "Selecciona un punto con más contraste."
         )
-
-    rot_template = _build_rotation_template(first_frame, anchor)
 
     log(
         f"Plantilla construida ({template.shape[1]}×{template.shape[0]} px) "
@@ -801,12 +798,10 @@ def stabilize_folder(
         frame = cv2.imread(f)
         if frame is None:
             points.append(None)
-            angles.append(None)
             failures += 1
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
             pt = None
-            angle = None
             ambiguous = False
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -828,11 +823,8 @@ def stabilize_folder(
                 cx, cy, _ncc, _combined = ranked[0]
                 pt = (cx, cy)
                 predictor.update(pt)
-                if rot_template is not None:
-                    angle = _estimate_rotation(gray, rot_template, cx, cy)
 
             points.append(pt)
-            angles.append(angle)
             if pt is None:
                 failures += 1
                 if not ambiguous:
@@ -893,25 +885,6 @@ def stabilize_folder(
         ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
     per_frame = list(zip(xs.tolist(), ys.tolist(), strict=True))
 
-    # Interpolate missing angles (ECC failures, out-of-bounds) then smooth.
-    # Raw per-frame ECC on a small patch is noisy at the sub-tenth-degree
-    # scale; without smoothing that noise warps every frame slightly.
-    ang = np.array([a if a is not None else np.nan for a in angles], dtype=np.float32)
-    idx_a = np.arange(len(ang))
-    good_a = np.isfinite(ang)
-    if np.any(good_a):
-        ang[~good_a] = np.interp(idx_a[~good_a], idx_a[good_a], ang[good_a])
-    else:
-        ang[:] = 0.0
-    k = smooth_radius * 2 + 1
-    kernel = np.ones(k, dtype=np.float32) / k
-    ang_smoothed = np.convolve(
-        np.pad(ang, (smooth_radius, smooth_radius), mode="edge"),
-        kernel,
-        mode="valid",
-    )
-    per_frame_angles = ang_smoothed.tolist()
-
     log("Segunda pasada: estabilizando y guardando...")
 
     cv_border = _BORDER_MODES.get(border_mode, cv2.BORDER_REPLICATE)
@@ -928,19 +901,7 @@ def stabilize_folder(
             pt = per_frame[i - 1]
             dx = target_x - pt[0]
             dy = target_y - pt[1]
-            angle = per_frame_angles[i - 1] if i - 1 < len(per_frame_angles) else 0.0
-
-            # Build rotation + translation matrix.
-            # Rotate around the detected position to correct in-gate tilt,
-            # then translate to align to the target.
-            if abs(angle) > 0.001:
-                perf_x, perf_y = pt[0], pt[1]
-                R = cv2.getRotationMatrix2D((perf_x, perf_y), -angle, 1.0)
-                R[0, 2] += dx
-                R[1, 2] += dy
-                M = R
-            else:
-                M = np.float32([[1, 0, dx], [0, 1, dy]])
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
             stabilized = cv2.warpAffine(
                 frame,
                 M,
