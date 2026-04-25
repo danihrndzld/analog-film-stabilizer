@@ -20,6 +20,7 @@ See docs/plans/2026-04-23-001-feat-stabilization-quality-pass-plan.md
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import cv2
@@ -31,6 +32,7 @@ from perforation_stabilizer_app import (
     _template_match_candidates,
 )
 
+# ── Phase 0 calibration thresholds and defaults ─────────────────────────────
 DEFAULT_N_SAMPLES = 30
 EFFECTIVE_N_FLOOR = 20
 SPACING_STABILITY_RATIO = 0.10  # std/mean must stay below this
@@ -118,7 +120,7 @@ def run_calibration(
     anchor2: tuple[float, float],
     *,
     n_samples: int = DEFAULT_N_SAMPLES,
-    log,
+    log: Callable[[str], None],
 ) -> CalibrationState | None:
     """Sample N frames evenly across the batch and return calibrated state.
 
