@@ -861,7 +861,7 @@ exists).
 
 ---
 
-- [ ] **Unit 7: UI counter row + `stabilization_report.txt` schema**
+- [x] **Unit 7: UI counter row + `stabilization_report.txt` schema**
 
 **Goal:** Surface the new counters in both the Electron summary row
 and the on-disk report. No new IPC message types — fields ride on
@@ -927,7 +927,7 @@ existing `done.summary`.
 
 ---
 
-- [ ] **Unit 8: R13 pass-1 health check + circuit breaker**
+- [x] **Unit 8: R13 pass-1 health check + circuit breaker**
 
 **Goal:** After Pass 1 completes, splices are detected, and Unit 6
 reclassifies, compute the non-splice reject rate. If above the
