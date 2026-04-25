@@ -5,6 +5,8 @@ from collections import namedtuple
 import cv2
 import numpy as np
 
+from trajectory_smoothing import detect_splices, rigid_fit_2pt, smooth_trajectory
+
 VALID_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
 
 
@@ -537,40 +539,101 @@ def _locate_anchor_in_frame(
     return _FrameOutcome(None, False, True, ranked, predicted)
 
 
+MIN_ANCHOR_SEPARATION_FRAC = 0.25
+
+
+def _track_anchor_pass(
+    files,
+    template,
+    anchor_in_tpl,
+    predictor,
+    search_radius,
+    perf_spacing,
+    log,
+    label,
+):
+    """Run per-frame tracking for a single anchor across all frames.
+
+    Returns four parallel lists of length ``len(files)``:
+      - positions: (x, y) tuples or None (None = ambiguous/rejected/failed)
+      - nccs: top-candidate NCC (or NaN when no candidate)
+      - ambiguous_flags: bool per frame
+      - motion_rejected_flags: bool per frame
+      - outcomes: the raw _FrameOutcome (for debug drawing)
+    """
+    n = len(files)
+    positions = [None] * n
+    nccs = np.full(n, np.nan, dtype=np.float64)
+    amb = np.zeros(n, dtype=bool)
+    rej = np.zeros(n, dtype=bool)
+    fail = np.zeros(n, dtype=bool)
+    outcomes = [None] * n
+
+    for i, f in enumerate(files):
+        frame = cv2.imread(f)
+        if frame is None:
+            fail[i] = True
+            log(f"[{label}] No pude abrir: {os.path.basename(f)}")
+            continue
+
+        outcome = _locate_anchor_in_frame(
+            frame,
+            template,
+            anchor_in_tpl,
+            predictor,
+            search_radius,
+            perf_spacing,
+            min_confidence=0.3,
+        )
+        outcomes[i] = outcome
+        if outcome.ranked:
+            nccs[i] = float(outcome.ranked[0][2])
+
+        if outcome.ambiguous:
+            amb[i] = True
+        elif outcome.motion_rejected:
+            rej[i] = True
+        elif outcome.pt is not None:
+            predictor.update(outcome.pt)
+            positions[i] = outcome.pt
+        else:
+            fail[i] = True
+
+    return positions, nccs, amb, rej, fail, outcomes
+
+
 def stabilize_folder(
     input_dir,
     output_dir,
-    anchor,
+    anchor1,
+    anchor2,
     progress_cb=None,
     log_cb=None,
     jpeg_quality=0,
     debug_dir=None,
     border_mode="replicate",
 ):
-    """Stabilize a folder of frames using the user-selected anchor point.
+    """Stabilize a folder of frames using two user-selected anchor points.
+
+    Two anchors give a rotation lever arm plus detection redundancy. Each
+    anchor is tracked independently; frames where both anchors succeed get a
+    closed-form rigid transform (translation + rotation). The full transform
+    series is then globally smoothed with splice-segmented Savitzky-Golay +
+    MAD outlier refit before warp.
 
     Parameters
     ----------
-    input_dir : str
-        Path to folder containing input frames.
-    output_dir : str
-        Path to folder where stabilized frames will be written.
-    anchor : tuple(float, float)
-        User-selected (x, y) reference point in frame coordinates.
-        This is the point that will be locked to a fixed position.
+    input_dir, output_dir : str
+    anchor1, anchor2 : tuple(float, float)
+        User-selected reference points. Both required.
     progress_cb : callable or None
-        Called with a float 0.0-1.0 indicating progress.
     log_cb : callable or None
-        Called with log message strings.
-    jpeg_quality : int
-        JPEG quality 1-100, or 0 for PNG lossless output.
+    jpeg_quality : int  -- 0 for PNG lossless, 1-100 for JPEG
     debug_dir : str or None
-        Directory for debug images on failed detections.
-    border_mode : str
-        Border fill mode: 'replicate', 'constant', or 'reflect'.
+    border_mode : str -- 'replicate', 'constant', or 'reflect'
     """
-    if anchor is None:
-        raise ValueError("Se requiere un punto de referencia (anchor).")
+    if anchor1 is None or anchor2 is None:
+        raise ValueError("Se requieren dos puntos de referencia (anchor1 y anchor2).")
 
     files = list_images(input_dir)
     if not files:
@@ -580,8 +643,6 @@ def stabilize_folder(
     if debug_dir:
         os.makedirs(debug_dir, exist_ok=True)
 
-    points = []
-    failures = 0
     total = len(files)
 
     def log(msg):
@@ -590,101 +651,105 @@ def stabilize_folder(
 
     log(f"Encontré {total} imágenes.")
 
-    # ── Phase 1: Build reference template from user-selected anchor ──
-    log("Fase 1: construyendo plantilla de referencia...")
+    # ── Phase 1: Build reference templates and validate anchor separation ──
+    log("Fase 1: construyendo plantillas de referencia...")
 
     first_frame = None
     for f in files:
         first_frame = cv2.imread(f)
         if first_frame is not None:
             break
-
     if first_frame is None:
         raise RuntimeError("No pude abrir ningún frame de la carpeta.")
 
-    template, anchor_in_tpl = _build_perforation_template(first_frame, anchor)
-    if template is None:
+    fh, fw = first_frame.shape[:2]
+    min_sep = MIN_ANCHOR_SEPARATION_FRAC * min(fh, fw)
+    sep = float(np.hypot(anchor1[0] - anchor2[0], anchor1[1] - anchor2[1]))
+    if sep < min_sep:
+        raise ValueError(
+            f"Los dos puntos están demasiado cerca ({sep:.0f}px < {min_sep:.0f}px). "
+            "Sepáralos más para que haya suficiente base para detectar rotación."
+        )
+
+    template1, anchor1_in_tpl = _build_perforation_template(first_frame, anchor1)
+    template2, anchor2_in_tpl = _build_perforation_template(first_frame, anchor2)
+    if template1 is None:
         raise RuntimeError(
-            f"No pude extraer plantilla en el punto ({anchor[0]:.0f}, {anchor[1]:.0f}). "
+            f"No pude extraer plantilla 1 en ({anchor1[0]:.0f}, {anchor1[1]:.0f}). "
+            "Selecciona un punto con más contraste."
+        )
+    if template2 is None:
+        raise RuntimeError(
+            f"No pude extraer plantilla 2 en ({anchor2[0]:.0f}, {anchor2[1]:.0f}). "
             "Selecciona un punto con más contraste."
         )
 
     log(
-        f"Plantilla construida ({template.shape[1]}×{template.shape[0]} px) "
-        f"en ({anchor[0]:.0f}, {anchor[1]:.0f})"
+        f"Plantillas: 1={template1.shape[1]}×{template1.shape[0]} en "
+        f"({anchor1[0]:.0f},{anchor1[1]:.0f}); 2={template2.shape[1]}×{template2.shape[0]} "
+        f"en ({anchor2[0]:.0f},{anchor2[1]:.0f}); separación={sep:.0f}px."
     )
 
-    # The user's anchor IS the stabilization target
-    target_x = float(anchor[0])
-    target_y = float(anchor[1])
-
-    # ── Phase 2: Detect anchor position in all frames via template matching ──
-    log("Fase 2: alineando frames...")
-
-    perf_spacing = _detect_perf_spacing(first_frame, anchor)
+    perf_spacing = _detect_perf_spacing(first_frame, anchor1)
     if perf_spacing is None:
         raise RuntimeError(
             "No pude detectar el espaciado entre perforaciones en el primer frame. "
-            "Asegúrate de que el punto seleccionado esté sobre una perforación clara "
+            "Asegúrate de que el primer punto esté sobre una perforación clara "
             "y que el encuadre incluya al menos tres perforaciones visibles."
         )
-    log(f"Espaciado entre perforaciones detectado: {perf_spacing:.0f}px.")
+    log(f"Espaciado entre perforaciones: {perf_spacing:.0f}px.")
 
-    # Search radius: generous enough to absorb real jitter but strictly less
-    # than perf_spacing so NCC cannot reach a neighbouring perforation.
     search_radius = int(min(max(perf_spacing * 0.45, 80), perf_spacing - 40))
-    predictor = _MotionPredictor(initial_pos=anchor, alpha=0.6)
-    ambiguous_count = 0
-    motion_rejected_count = 0
+    predictor1 = _MotionPredictor(initial_pos=anchor1, alpha=0.6)
+    predictor2 = _MotionPredictor(initial_pos=anchor2, alpha=0.6)
 
-    for i, f in enumerate(files, 1):
-        frame = cv2.imread(f)
-        if frame is None:
-            points.append(None)
-            failures += 1
-            log(f"No pude abrir: {os.path.basename(f)}")
-        else:
-            outcome = _locate_anchor_in_frame(
-                frame,
-                template,
-                anchor_in_tpl,
-                predictor,
-                search_radius,
-                perf_spacing,
-                min_confidence=0.3,
-            )
+    # ── Phase 2: Per-anchor tracking passes ──
+    log("Fase 2a: rastreando anclaje 1...")
+    pos1, ncc1, amb1, rej1, fail1, out1 = _track_anchor_pass(
+        files,
+        template1,
+        anchor1_in_tpl,
+        predictor1,
+        search_radius,
+        perf_spacing,
+        log,
+        "a1",
+    )
+    log("Fase 2b: rastreando anclaje 2...")
+    pos2, ncc2, amb2, rej2, fail2, out2 = _track_anchor_pass(
+        files,
+        template2,
+        anchor2_in_tpl,
+        predictor2,
+        search_radius,
+        perf_spacing,
+        log,
+        "a2",
+    )
 
-            if outcome.ambiguous:
-                ambiguous_count += 1
-                log(f"Ambigüedad en {os.path.basename(f)}; uso predicción previa.")
-                # Use predicted position so the frame still warps, but don't
-                # update the predictor (see _locate_anchor_in_frame docstring).
-                points.append(outcome.pt)
-            elif outcome.motion_rejected:
-                # Motion-plausibility gate rejection OR empty ROI. Neighbours
-                # will interpolate this frame; the predictor is NOT updated
-                # and this does NOT count as a failed detection (the three
-                # counters — ambiguous, motion_rejected, failures — are
-                # disjoint by design).
-                motion_rejected_count += 1
-                points.append(None)
-                log(f"Rechazada por movimiento (fuera de rango): {os.path.basename(f)}")
-            elif outcome.pt is not None:
-                predictor.update(outcome.pt)
-                points.append(outcome.pt)
-            else:
-                points.append(None)
-                failures += 1
-                log(f"Sin detección: {os.path.basename(f)}")
-
-            if outcome.pt is None and debug_dir:
-                try:
-                    basename = os.path.splitext(os.path.basename(f))[0] + "_debug.jpg"
-                    debug_path = os.path.join(debug_dir, basename)
-                    dbg = frame.copy()
+    # Debug frames: save when either anchor failed on this frame.
+    if debug_dir:
+        for i, f in enumerate(files):
+            a1_bad = pos1[i] is None
+            a2_bad = pos2[i] is None
+            if not (a1_bad or a2_bad):
+                continue
+            frame = cv2.imread(f)
+            if frame is None:
+                continue
+            try:
+                basename = os.path.splitext(os.path.basename(f))[0] + "_debug.jpg"
+                debug_path = os.path.join(debug_dir, basename)
+                dbg = frame.copy()
+                for label_color, outcome in (
+                    ((0, 255, 0), out1[i]),
+                    ((0, 200, 255), out2[i]),
+                ):
+                    if outcome is None:
+                        continue
                     for rank_idx, c in enumerate(outcome.ranked[:5]):
                         cx_c, cy_c, ncc_c, _sc = c
-                        color = (0, 255, 0) if rank_idx == 0 else (0, 165, 255)
+                        color = label_color if rank_idx == 0 else (0, 165, 255)
                         cv2.circle(dbg, (int(cx_c), int(cy_c)), 20, color, 3)
                         cv2.putText(
                             dbg,
@@ -704,33 +769,56 @@ def stabilize_folder(
                         30,
                         2,
                     )
-                    cv2.imwrite(debug_path, dbg, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                except Exception as exc:
-                    log(f"Debug image failed: {exc}")
-        if progress_cb:
-            progress_cb(i / (total * 2))
+                cv2.imwrite(debug_path, dbg, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            except Exception as exc:
+                log(f"Debug image failed: {exc}")
 
-    log(f"Detección: {total - failures} exitosos, {failures} fallidos de {total}")
+    both_detected = [
+        (p1 is not None and p2 is not None) for p1, p2 in zip(pos1, pos2, strict=True)
+    ]
+    detected_count = sum(both_detected)
+    failed_both_required = total - detected_count
 
-    valid = [p for p in points if p is not None]
-    if not valid:
-        raise RuntimeError("No logré detectar la referencia en ningún frame.")
+    if progress_cb:
+        progress_cb(0.5)
 
-    log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
+    if detected_count == 0:
+        raise RuntimeError("No logré detectar ambos anclajes en ningún frame.")
 
-    # Fill None positions (failed detections) by linear interpolation.
-    xs = np.array([p[0] if p is not None else np.nan for p in points], dtype=np.float32)
-    ys = np.array([p[1] if p is not None else np.nan for p in points], dtype=np.float32)
-    idx = np.arange(len(xs))
-    good_x = np.isfinite(xs)
-    good_y = np.isfinite(ys)
-    if np.any(good_x):
-        xs[~good_x] = np.interp(idx[~good_x], idx[good_x], xs[good_x])
-    if np.any(good_y):
-        ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
-    per_frame = list(zip(xs.tolist(), ys.tolist(), strict=True))
+    log(f"Detección: {detected_count}/{total} frames con ambos anclajes.")
 
-    log("Segunda pasada: estabilizando y guardando...")
+    # ── Phase 3: Build raw transform series, smooth, then warp ──
+    ref_pts = (tuple(map(float, anchor1)), tuple(map(float, anchor2)))
+
+    tx_raw = np.full(total, np.nan, dtype=np.float64)
+    ty_raw = np.full(total, np.nan, dtype=np.float64)
+    theta_raw = np.full(total, np.nan, dtype=np.float64)
+    for i, ok in enumerate(both_detected):
+        if not ok:
+            continue
+        try:
+            tx, ty, th = rigid_fit_2pt(ref_pts, (pos1[i], pos2[i]))
+        except ValueError:
+            continue
+        tx_raw[i] = tx
+        ty_raw[i] = ty
+        theta_raw[i] = th
+
+    splices = detect_splices(ncc1, ncc2, tx_raw, ty_raw, theta_raw, perf_spacing)
+    tx_s, ty_s, theta_s, outlier_mask = smooth_trajectory(
+        tx_raw,
+        ty_raw,
+        theta_raw,
+        splices,
+    )
+    outlier_count = int(outlier_mask.sum())
+
+    log(
+        f"Suavizado: {len(splices)} segmento(s); {outlier_count} outlier(s) reemplazados."
+    )
+
+    # ── Phase 4: Warp each frame with its smoothed rigid transform ──
+    log("Fase 3: aplicando transformaciones y guardando...")
 
     cv_border = _BORDER_MODES.get(border_mode, cv2.BORDER_REPLICATE)
     out_w = out_h = None
@@ -738,15 +826,24 @@ def stabilize_folder(
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
         if frame is None:
-            log(f"No pude abrir en segunda pasada: {os.path.basename(f)}")
+            log(f"No pude abrir en la pasada de warp: {os.path.basename(f)}")
         else:
             h, w = frame.shape[:2]
             if out_h is None:
                 out_h, out_w = h, w
-            pt = per_frame[i - 1]
-            dx = target_x - pt[0]
-            dy = target_y - pt[1]
-            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            idx = i - 1
+            # Translation-only warp. theta_s is computed by rigid_fit_2pt and
+            # consumed by detect_splices as a discontinuity signal, but it is
+            # intentionally NOT applied to the warp output here. Completes the
+            # intent of commit 0c0c330 ("translation-only pipeline"). R4b's
+            # absolute-position drift gate depends on this — see plan
+            # docs/plans/2026-04-23-001-feat-stabilization-quality-pass-plan.md.
+            c, s = 1.0, 0.0
+            tx = float(tx_s[idx])
+            ty = float(ty_s[idx])
+            inv_tx = -tx
+            inv_ty = -ty
+            M = np.float32([[c, s, inv_tx], [-s, c, inv_ty]])
             stabilized = cv2.warpAffine(
                 frame,
                 M,
@@ -766,17 +863,28 @@ def stabilize_folder(
                     out_path, stabilized, [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
                 )
         if progress_cb:
-            progress_cb((total + i) / (total * 2))
+            progress_cb(0.5 + 0.5 * (i / total))
 
     summary = {
         "total_frames": total,
-        "failed_detections": failures,
-        "ambiguous_frames": ambiguous_count,
-        "motion_rejected_frames": motion_rejected_count,
+        "detected_both_frames": detected_count,
+        "failed_frames_both_required": failed_both_required,
+        "ambiguous_frames_a1": int(amb1.sum()),
+        "ambiguous_frames_a2": int(amb2.sum()),
+        "motion_rejected_frames_a1": int(rej1.sum()),
+        "motion_rejected_frames_a2": int(rej2.sum()),
+        "failed_detections_a1": int(fail1.sum()),
+        "failed_detections_a2": int(fail2.sum()),
+        "outlier_frames_replaced": outlier_count,
+        "splice_count": max(0, len(splices) - 1),
+        "splice_indices": [int(s) for s in splices[1:]],
         "perf_spacing_px": round(float(perf_spacing), 1),
         "search_radius_px": int(search_radius),
-        "target_x": round(target_x, 3),
-        "target_y": round(target_y, 3),
+        "anchor1_ref": [round(float(anchor1[0]), 3), round(float(anchor1[1]), 3)],
+        "anchor2_ref": [round(float(anchor2[0]), 3), round(float(anchor2[1]), 3)],
+        "anchor_separation_px": round(sep, 1),
+        "target_x": round(float(anchor1[0]), 3),
+        "target_y": round(float(anchor1[1]), 3),
         "output_width": out_w,
         "output_height": out_h,
         "output_format": "png (lossless)"
@@ -795,6 +903,7 @@ def stabilize_folder(
 
     log("Listo.")
     log(f"Frames: {summary['total_frames']}")
-    log(f"Sin detección: {summary['failed_detections']}")
+    log(f"Detectados (ambos anclajes): {detected_count}")
+    log(f"Splices detectados: {summary['splice_count']}")
     log(f"Tamaño de salida: {out_w}×{out_h} px")
     return summary
