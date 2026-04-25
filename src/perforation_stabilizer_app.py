@@ -562,6 +562,9 @@ def _locate_anchor_in_frame(
 
 
 MIN_ANCHOR_SEPARATION_FRAC = 0.25
+CONSENSUS_SCALE_TOLERANCE = 0.05
+CONSENSUS_ABS_DRIFT_MULT = 1.0
+SINGLE_ANCHOR_PRIOR_MULT = 0.5
 
 
 def _track_anchor_pass(
@@ -639,6 +642,133 @@ def _track_anchor_pass(
         failed_mask=fail,
         outcomes=outcomes,
     )
+
+
+def _distance(a, b):
+    return float(np.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])))
+
+
+def _ncc_score(result: TrackPassResult, idx: int) -> float:
+    score = float(result.nccs[idx])
+    return score if np.isfinite(score) else float("-inf")
+
+
+def _reject_by_consensus(result: TrackPassResult, idx: int):
+    if result.motion_rejected[idx]:
+        return
+    result.consensus_rejected[idx] = True
+    result.positions[idx] = None
+
+
+def _apply_consensus_gates(
+    result1: TrackPassResult,
+    result2: TrackPassResult,
+    anchor1,
+    anchor2,
+    perf_spacing,
+    calibration,
+    *,
+    fallback_mode=False,
+    scale_tolerance=CONSENSUS_SCALE_TOLERANCE,
+    abs_drift_mult=CONSENSUS_ABS_DRIFT_MULT,
+    single_anchor_prior_mult=SINGLE_ANCHOR_PRIOR_MULT,
+    predictor_alpha=0.6,
+):
+    """Apply R4 pair gates and R5 single-anchor fallback in place.
+
+    Motion rejections keep priority: an anchor already motion-rejected is not
+    also counted as consensus-rejected. Frames with one surviving anchor remain
+    usable because the warp is translation-only; the raw transform stage uses
+    that single anchor's observed translation.
+    """
+    n = len(result1.positions)
+    nan_filled = np.zeros(n, dtype=bool)
+    predictor1 = _MotionPredictor(anchor1, alpha=predictor_alpha)
+    predictor2 = _MotionPredictor(anchor2, alpha=predictor_alpha)
+
+    ref1 = getattr(calibration, "anchor1_ref", anchor1)
+    ref2 = getattr(calibration, "anchor2_ref", anchor2)
+    base_sep = max(_distance(ref1, ref2), 1e-6)
+    drift_limit = abs_drift_mult * float(perf_spacing)
+    prior_limit = single_anchor_prior_mult * float(perf_spacing)
+
+    def prior_passes(pos, predicted):
+        return pos is not None and _distance(pos, predicted) <= prior_limit
+
+    for idx in range(n):
+        pred1 = predictor1.predict()
+        pred2 = predictor2.predict()
+        p1 = None if result1.motion_rejected[idx] else result1.positions[idx]
+        p2 = None if result2.motion_rejected[idx] else result2.positions[idx]
+
+        reject1 = False
+        reject2 = False
+
+        if p1 is None and p2 is None:
+            nan_filled[idx] = True
+            continue
+
+        if p1 is None:
+            reject2 = not prior_passes(p2, pred2)
+        elif p2 is None:
+            reject1 = not prior_passes(p1, pred1)
+        elif not fallback_mode:
+            current_sep = _distance(p1, p2)
+            scale_failed = abs(current_sep - base_sep) > scale_tolerance * base_sep
+            reject1 = _distance(p1, ref1) > drift_limit
+            reject2 = _distance(p2, ref2) > drift_limit
+
+            if scale_failed and not (reject1 or reject2):
+                score1 = _ncc_score(result1, idx)
+                score2 = _ncc_score(result2, idx)
+                if score1 > score2:
+                    reject2 = True
+                elif score2 > score1:
+                    reject1 = True
+                else:
+                    reject1 = True
+                    reject2 = True
+
+            if reject1 and reject2:
+                rescued = False
+                candidates = sorted(
+                    (
+                        (_ncc_score(result1, idx), "a1", p1, pred1),
+                        (_ncc_score(result2, idx), "a2", p2, pred2),
+                    ),
+                    key=lambda item: item[0],
+                    reverse=True,
+                )
+                for _score, label, pos, pred in candidates:
+                    if prior_passes(pos, pred):
+                        if label == "a1":
+                            reject1 = False
+                        else:
+                            reject2 = False
+                        rescued = True
+                        break
+                if not rescued:
+                    reject1 = True
+                    reject2 = True
+            elif reject1:
+                reject2 = not prior_passes(p2, pred2)
+            elif reject2:
+                reject1 = not prior_passes(p1, pred1)
+
+        if reject1:
+            _reject_by_consensus(result1, idx)
+            p1 = None
+        if reject2:
+            _reject_by_consensus(result2, idx)
+            p2 = None
+
+        nan_filled[idx] = p1 is None and p2 is None
+        if p1 is not None:
+            predictor1.update(p1)
+        if p2 is not None:
+            predictor2.update(p2)
+
+    return nan_filled
 
 
 def stabilize_folder(
@@ -821,6 +951,18 @@ def stabilize_folder(
         result2.outcomes,
     )
 
+    nan_filled_mask = _apply_consensus_gates(
+        result1,
+        result2,
+        anchor1,
+        anchor2,
+        perf_spacing,
+        calibration,
+        fallback_mode=calibration_status == "fallback",
+    )
+    cons1 = result1.consensus_rejected
+    cons2 = result2.consensus_rejected
+
     # Debug frames: save when either anchor failed on this frame.
     if debug_dir:
         for i, f in enumerate(files):
@@ -871,15 +1013,24 @@ def stabilize_folder(
         (p1 is not None and p2 is not None) for p1, p2 in zip(pos1, pos2, strict=True)
     ]
     detected_count = sum(both_detected)
+    usable_detected = [
+        (p1 is not None or p2 is not None) for p1, p2 in zip(pos1, pos2, strict=True)
+    ]
+    usable_count = sum(usable_detected)
     failed_both_required = total - detected_count
 
     if progress_cb:
         progress_cb(0.5)
 
-    if detected_count == 0:
-        raise RuntimeError("No logré detectar ambos anclajes en ningún frame.")
+    if usable_count == 0:
+        raise RuntimeError(
+            "No logré detectar ningún anclaje utilizable en ningún frame."
+        )
 
-    log(f"Detección: {detected_count}/{total} frames con ambos anclajes.")
+    log(
+        f"Detección: {detected_count}/{total} frames con ambos anclajes; "
+        f"{usable_count}/{total} con al menos un anclaje utilizable."
+    )
 
     # ── Phase 3: Build raw transform series, smooth, then warp ──
     ref_pts = (tuple(map(float, anchor1)), tuple(map(float, anchor2)))
@@ -887,12 +1038,23 @@ def stabilize_folder(
     tx_raw = np.full(total, np.nan, dtype=np.float64)
     ty_raw = np.full(total, np.nan, dtype=np.float64)
     theta_raw = np.full(total, np.nan, dtype=np.float64)
-    for i, ok in enumerate(both_detected):
-        if not ok:
-            continue
-        try:
-            tx, ty, th = rigid_fit_2pt(ref_pts, (pos1[i], pos2[i]))
-        except ValueError:
+    for i in range(total):
+        p1 = pos1[i]
+        p2 = pos2[i]
+        if p1 is not None and p2 is not None:
+            try:
+                tx, ty, th = rigid_fit_2pt(ref_pts, (p1, p2))
+            except ValueError:
+                continue
+        elif p1 is not None:
+            tx = float(p1[0]) - float(anchor1[0])
+            ty = float(p1[1]) - float(anchor1[1])
+            th = 0.0
+        elif p2 is not None:
+            tx = float(p2[0]) - float(anchor2[0])
+            ty = float(p2[1]) - float(anchor2[1])
+            th = 0.0
+        else:
             continue
         tx_raw[i] = tx
         ty_raw[i] = ty
@@ -967,6 +1129,9 @@ def stabilize_folder(
         "ambiguous_frames_a2": int(amb2.sum()),
         "motion_rejected_frames_a1": int(rej1.sum()),
         "motion_rejected_frames_a2": int(rej2.sum()),
+        "consensus_rejected_frames_a1": int(cons1.sum()),
+        "consensus_rejected_frames_a2": int(cons2.sum()),
+        "nan_filled_frames": int(nan_filled_mask.sum()),
         "failed_detections_a1": int(fail1.sum()),
         "failed_detections_a2": int(fail2.sum()),
         "outlier_frames_replaced": outlier_count,

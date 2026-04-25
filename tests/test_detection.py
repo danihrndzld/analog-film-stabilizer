@@ -4,9 +4,11 @@ These tests use synthetic frames built with NumPy/OpenCV — no sample images
 needed.  The user provides an anchor point (x, y) on the first frame, and
 template matching tracks that point across all frames.
 """
+
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -15,6 +17,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from perforation_stabilizer_app import (
+    TrackPassResult,
+    _apply_consensus_gates,
     _build_perforation_template,
     _detect_perf_bbox,
     _detect_perf_spacing,
@@ -40,8 +44,9 @@ PERF_H = 100
 TRI_PERF = [0.2, 0.5, 0.8]
 
 
-def make_frame(perf_y_fracs, frame_h=FRAME_H, frame_w=FRAME_W,
-               perf_w=PERF_W, perf_h=PERF_H):
+def make_frame(
+    perf_y_fracs, frame_h=FRAME_H, frame_w=FRAME_W, perf_w=PERF_W, perf_h=PERF_H
+):
     """Return a BGR frame with bright rectangles at given vertical positions."""
     frame = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
     rw = max(50, int(frame_w * 0.22))
@@ -83,10 +88,31 @@ def _tri_anchor2():
     return _perf_centroid(0.2)
 
 
+def _track_result(positions, nccs=None, motion_rejected=None):
+    """Small TrackPassResult factory for pure consensus-gate tests."""
+    n = len(positions)
+    if nccs is None:
+        nccs = [0.9 if p is not None else np.nan for p in positions]
+    if motion_rejected is None:
+        motion_rejected = [False] * n
+    return TrackPassResult(
+        positions=list(positions),
+        nccs=np.asarray(nccs, dtype=np.float64),
+        ambiguous_mask=np.zeros(n, dtype=bool),
+        motion_rejected=np.asarray(motion_rejected, dtype=bool),
+        consensus_rejected=np.zeros(n, dtype=bool),
+        failed_mask=np.asarray(
+            [p is None and not motion_rejected[i] for i, p in enumerate(positions)],
+            dtype=bool,
+        ),
+        outcomes=[None] * n,
+    )
+
+
 # ── Template building ──────────────────────────────────────────────────────────
 
-class TestBuildTemplate:
 
+class TestBuildTemplate:
     def test_build_template_returns_patch(self):
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
@@ -140,8 +166,8 @@ class TestBuildTemplate:
 
 # ── Contextual template (auto-scaled, asymmetric vertical) ────────────────────
 
-class TestContextualTemplate:
 
+class TestContextualTemplate:
     def test_auto_scaled_template_is_taller_than_wide(self):
         frame = make_frame([0.25])
         anchor = _perf_centroid(0.25)
@@ -186,8 +212,8 @@ class TestContextualTemplate:
 
 # ── Template matching (candidates with k=1) ───────────────────────────────────
 
-class TestTemplateMatching:
 
+class TestTemplateMatching:
     def test_candidates_finds_anchor(self):
         """Top candidate on the same frame used to build the template matches the anchor."""
         frame = make_frame([0.25])
@@ -195,9 +221,7 @@ class TestTemplateMatching:
         tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         assert tpl is not None
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        cands = _template_match_candidates(
-            gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl
-        )
+        cands = _template_match_candidates(gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl)
         assert cands, "Expected at least one candidate"
         cx, cy, conf = cands[0]
         assert abs(cx - anchor[0]) < 10
@@ -210,9 +234,7 @@ class TestTemplateMatching:
         anchor = _perf_centroid(0.25)
         tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        cands = _template_match_candidates(
-            gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl
-        )
+        cands = _template_match_candidates(gray, tpl, k=1, anchor_in_tpl=anchor_in_tpl)
         assert cands
         cx, cy, _ = cands[0]
         assert isinstance(cx, float)
@@ -238,8 +260,11 @@ class TestTemplateMatching:
         two_perf_frame = make_frame([0.25, 0.75])
         gray = cv2.cvtColor(two_perf_frame, cv2.COLOR_BGR2GRAY)
         cands = _template_match_candidates(
-            gray, tpl, k=1,
-            search_center=anchor, search_radius=100,
+            gray,
+            tpl,
+            k=1,
+            search_center=anchor,
+            search_radius=100,
             anchor_in_tpl=anchor_in_tpl,
         )
         assert cands, "Expected a candidate within the ROI"
@@ -261,8 +286,8 @@ class TestTemplateMatching:
 
 # ── Multi-peak (top-K) matching ───────────────────────────────────────────────
 
-class TestMultiPeakMatching:
 
+class TestMultiPeakMatching:
     def test_extract_top_k_finds_multiple_peaks(self):
         corr = np.zeros((200, 200), dtype=np.float32)
         peaks_expected = [(50, 50, 0.9), (150, 150, 0.7), (50, 150, 0.5)]
@@ -282,10 +307,7 @@ class TestMultiPeakMatching:
         corr[50, 55] = 0.85  # within suppression_radius=20 of first
 
         peaks = _extract_top_k_peaks(corr, k=5, suppression_radius=20)
-        distinct_peaks = [
-            p for p in peaks
-            if abs(p[0] - 50) > 1 or abs(p[1] - 50) > 1
-        ]
+        distinct_peaks = [p for p in peaks if abs(p[0] - 50) > 1 or abs(p[1] - 50) > 1]
         for _, _, score in distinct_peaks:
             assert score < 0.85 - 0.01
 
@@ -304,7 +326,7 @@ class TestMultiPeakMatching:
         corr = np.zeros((100, 100), dtype=np.float32)
         corr[20, 20] = 0.9  # first peak
         corr[20, 42] = 0.7  # second peak; its x=41 neighbour will be poisoned
-                             # by the first peak's suppression window (radius=20)
+        # by the first peak's suppression window (radius=20)
         peaks = _extract_top_k_peaks(corr, k=2, suppression_radius=20)
         assert len(peaks) >= 2
         for sx, sy, _ in peaks:
@@ -318,17 +340,19 @@ class TestMultiPeakMatching:
         gray = cv2.cvtColor(two_perf, cv2.COLOR_BGR2GRAY)
 
         candidates = _template_match_candidates(
-            gray, tpl, k=5, min_confidence=0.3, anchor_in_tpl=anchor_in_tpl,
+            gray,
+            tpl,
+            k=5,
+            min_confidence=0.3,
+            anchor_in_tpl=anchor_in_tpl,
         )
         upper = _perf_centroid(0.25)
         lower = _perf_centroid(0.75)
         matched_upper = any(
-            abs(c[0] - upper[0]) < 15 and abs(c[1] - upper[1]) < 15
-            for c in candidates
+            abs(c[0] - upper[0]) < 15 and abs(c[1] - upper[1]) < 15 for c in candidates
         )
         matched_lower = any(
-            abs(c[0] - lower[0]) < 15 and abs(c[1] - lower[1]) < 15
-            for c in candidates
+            abs(c[0] - lower[0]) < 15 and abs(c[1] - lower[1]) < 15 for c in candidates
         )
         assert matched_upper and matched_lower, (
             f"Expected both perfs in candidates, got: {candidates}"
@@ -340,15 +364,19 @@ class TestMultiPeakMatching:
         tpl, anchor_in_tpl = _build_perforation_template(frame, anchor)
         blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         candidates = _template_match_candidates(
-            blank, tpl, k=5, min_confidence=0.5, anchor_in_tpl=anchor_in_tpl,
+            blank,
+            tpl,
+            k=5,
+            min_confidence=0.5,
+            anchor_in_tpl=anchor_in_tpl,
         )
         assert candidates == []
 
 
 # ── Ranking and ambiguity ─────────────────────────────────────────────────────
 
-class TestRankingAndAmbiguity:
 
+class TestRankingAndAmbiguity:
     def test_motion_predictor_smooths_delta(self):
         p = _MotionPredictor(initial_pos=(100.0, 200.0), alpha=0.5)
         p.update((110.0, 200.0))
@@ -465,6 +493,7 @@ class TestRankingAndAmbiguity:
 
 # ── _locate_anchor_in_frame integration ──────────────────────────────────────
 
+
 class TestLocateAnchorInFrame:
     def _setup(self):
         frame = _tri_frame()
@@ -521,6 +550,7 @@ class TestLocateAnchorInFrame:
 
 # ── Search radius invariant ───────────────────────────────────────────────────
 
+
 class TestSearchRadiusInvariant:
     @pytest.mark.parametrize("perf_spacing", [200, 240, 300, 400, 800])
     def test_search_radius_strictly_less_than_spacing(self, perf_spacing):
@@ -535,32 +565,24 @@ class TestSearchRadiusInvariant:
 
 # ── Anchor-based stabilization workflow ────────────────────────────────────────
 
+
 class TestAnchorWorkflow:
-
     def test_stabilize_with_anchors_produces_output(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = _tri_frame()
             for i in range(5):
                 _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
 
-            stabilize_folder(
-                inp, out, _tri_anchor(), _tri_anchor2(), jpeg_quality=95
-            )
+            stabilize_folder(inp, out, _tri_anchor(), _tri_anchor2(), jpeg_quality=95)
 
             out_images = [f for f in os.listdir(out) if f.endswith(".jpg")]
             assert len(out_images) == 5
 
     def test_stabilize_produces_report(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             _write_frame(os.path.join(inp, "frame_001.jpg"), _tri_frame())
 
-            stabilize_folder(
-                inp, out, _tri_anchor(), _tri_anchor2(), jpeg_quality=95
-            )
+            stabilize_folder(inp, out, _tri_anchor(), _tri_anchor2(), jpeg_quality=95)
 
             report = os.path.join(out, "stabilization_report.txt")
             assert os.path.exists(report)
@@ -572,22 +594,16 @@ class TestAnchorWorkflow:
             assert "film_format" not in content
 
     def test_stabilize_single_frame(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             _write_frame(os.path.join(inp, "single.jpg"), _tri_frame())
 
-            stabilize_folder(
-                inp, out, _tri_anchor(), _tri_anchor2(), jpeg_quality=95
-            )
+            stabilize_folder(inp, out, _tri_anchor(), _tri_anchor2(), jpeg_quality=95)
 
             out_images = [f for f in os.listdir(out) if f.endswith(".jpg")]
             assert len(out_images) == 1
 
     def test_stabilize_raises_without_anchor(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             _write_frame(os.path.join(inp, "frame.jpg"), _tri_frame())
 
             with pytest.raises(ValueError, match="anchor"):
@@ -596,30 +612,28 @@ class TestAnchorWorkflow:
                 stabilize_folder(inp, out, _tri_anchor(), None, jpeg_quality=95)
 
     def test_stabilize_no_images_raises(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out, \
-             pytest.raises(RuntimeError, match="imágenes"):
-            stabilize_folder(
-                inp, out, (100.0, 200.0), (100.0, 700.0), jpeg_quality=95
-            )
+        with (
+            tempfile.TemporaryDirectory() as inp,
+            tempfile.TemporaryDirectory() as out,
+            pytest.raises(RuntimeError, match="imágenes"),
+        ):
+            stabilize_folder(inp, out, (100.0, 200.0), (100.0, 700.0), jpeg_quality=95)
 
     def test_stabilize_raises_when_perf_spacing_undetectable(self):
         """Two-perforation frame: templates succeed but spacing returns None → raise."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             _write_frame(os.path.join(inp, "frame.jpg"), make_frame([0.3, 0.7]))
             with pytest.raises(RuntimeError, match="espaciado"):
                 stabilize_folder(
-                    inp, out,
-                    _perf_centroid(0.3), _perf_centroid(0.7),
+                    inp,
+                    out,
+                    _perf_centroid(0.3),
+                    _perf_centroid(0.7),
                     jpeg_quality=95,
                 )
 
     def test_stabilize_identical_frames_zero_drift(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = _tri_frame()
             for i in range(3):
                 _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
@@ -638,13 +652,11 @@ class TestAnchorWorkflow:
 
 # ── Two-anchor-specific stabilization ─────────────────────────────────────────
 
-class TestTwoAnchorStabilization:
 
+class TestTwoAnchorStabilization:
     def test_raises_when_anchors_too_close(self):
         """min_sep = 0.25 * min(fh, fw). With 1000×1200 frame → 250px floor."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             _write_frame(os.path.join(inp, "frame.jpg"), _tri_frame())
             # Both anchors on the same perforation → zero separation.
             with pytest.raises(ValueError, match="cerca|separación|sepáralos"):
@@ -653,9 +665,7 @@ class TestTwoAnchorStabilization:
                 )
 
     def test_summary_reports_two_anchor_metrics(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             for i in range(4):
                 _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), _tri_frame())
 
@@ -670,6 +680,9 @@ class TestTwoAnchorStabilization:
                 "ambiguous_frames_a2",
                 "motion_rejected_frames_a1",
                 "motion_rejected_frames_a2",
+                "consensus_rejected_frames_a1",
+                "consensus_rejected_frames_a2",
+                "nan_filled_frames",
                 "failed_detections_a1",
                 "failed_detections_a2",
                 "outlier_frames_replaced",
@@ -682,19 +695,22 @@ class TestTwoAnchorStabilization:
                 assert key in summary, f"missing summary field: {key}"
 
             assert summary["anchor1_ref"] == [
-                round(float(a1[0]), 3), round(float(a1[1]), 3)
+                round(float(a1[0]), 3),
+                round(float(a1[1]), 3),
             ]
             assert summary["anchor2_ref"] == [
-                round(float(a2[0]), 3), round(float(a2[1]), 3)
+                round(float(a2[0]), 3),
+                round(float(a2[1]), 3),
             ]
             assert summary["anchor_separation_px"] > 0
             assert isinstance(summary["splice_indices"], list)
+            assert summary["consensus_rejected_frames_a1"] == 0
+            assert summary["consensus_rejected_frames_a2"] == 0
+            assert summary["nan_filled_frames"] == 0
 
     def test_raises_when_neither_anchor_detected_anywhere(self):
         """All-blank frames → detected_both_frames == 0 → raise."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             # First frame good (so template builds + spacing detects); all
             # subsequent frames blank. But we need *no* frame with both anchors
             # detected — so make the first frame good and keep only blanks in
@@ -714,54 +730,178 @@ class TestTwoAnchorStabilization:
             summary = stabilize_folder(inp, out, a1, a2, jpeg_quality=95)
             assert summary["detected_both_frames"] >= 1
             assert summary["failed_frames_both_required"] >= 3
+            assert summary["nan_filled_frames"] >= 3
+
+
+# ── Anchor-pair consensus gates ──────────────────────────────────────────────
+
+
+class TestAnchorPairConsensus:
+    def _calibration(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        return SimpleNamespace(anchor1_ref=a1, anchor2_ref=a2)
+
+    def test_clean_pair_has_no_consensus_rejections(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        result1 = _track_result([a1, a1])
+        result2 = _track_result([a2, a2])
+
+        nan_mask = _apply_consensus_gates(
+            result1, result2, a1, a2, 300.0, self._calibration()
+        )
+
+        assert not nan_mask.any()
+        assert not result1.consensus_rejected.any()
+        assert not result2.consensus_rejected.any()
+
+    def test_scale_gate_drops_lower_scoring_anchor_and_keeps_prior_anchor(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        wrong_a1 = (a1[0], a1[1] + 300.0)
+        result1 = _track_result([a1, wrong_a1], nccs=[0.9, 0.45])
+        result2 = _track_result([a2, a2], nccs=[0.9, 0.95])
+
+        nan_mask = _apply_consensus_gates(
+            result1, result2, a1, a2, 300.0, self._calibration()
+        )
+
+        assert result1.consensus_rejected.tolist() == [False, True]
+        assert result1.positions[1] is None
+        assert result2.positions[1] == a2
+        assert not nan_mask[1]
+
+    def test_both_wrong_same_offset_becomes_nan_filled(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        offset = 375.0
+        result1 = _track_result([a1, (a1[0], a1[1] + offset)])
+        result2 = _track_result([a2, (a2[0], a2[1] + offset)])
+
+        nan_mask = _apply_consensus_gates(
+            result1, result2, a1, a2, 300.0, self._calibration()
+        )
+
+        assert result1.consensus_rejected.tolist() == [False, True]
+        assert result2.consensus_rejected.tolist() == [False, True]
+        assert result1.positions[1] is None
+        assert result2.positions[1] is None
+        assert nan_mask.tolist() == [False, True]
+
+    def test_single_anchor_prior_accepts_modest_deviation(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        result1 = _track_result([a1, None])
+        result2 = _track_result([a2, (a2[0] + 20.0, a2[1])])
+
+        nan_mask = _apply_consensus_gates(
+            result1, result2, a1, a2, 300.0, self._calibration()
+        )
+
+        assert not result2.consensus_rejected[1]
+        assert result2.positions[1] == (a2[0] + 20.0, a2[1])
+        assert not nan_mask[1]
+
+    def test_single_anchor_prior_rejects_large_deviation(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        result1 = _track_result([a1, None])
+        result2 = _track_result([a2, (a2[0] + 200.0, a2[1])])
+
+        nan_mask = _apply_consensus_gates(
+            result1, result2, a1, a2, 300.0, self._calibration()
+        )
+
+        assert result2.consensus_rejected.tolist() == [False, True]
+        assert result2.positions[1] is None
+        assert nan_mask.tolist() == [False, True]
+
+    def test_motion_rejected_anchor_is_not_double_counted(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        result1 = _track_result([a1, None], motion_rejected=[False, True])
+        result2 = _track_result([a2, (a2[0] + 200.0, a2[1])])
+
+        _apply_consensus_gates(result1, result2, a1, a2, 300.0, self._calibration())
+
+        assert result1.motion_rejected[1]
+        assert not result1.consensus_rejected[1]
+        assert result2.consensus_rejected[1]
+        assert not np.any(result1.motion_rejected & result1.consensus_rejected)
+        assert not np.any(result2.motion_rejected & result2.consensus_rejected)
+
+    def test_fallback_mode_skips_pair_gates(self):
+        a1, a2 = _tri_anchor(), _tri_anchor2()
+        offset = 375.0
+        result1 = _track_result([a1, (a1[0], a1[1] + offset)])
+        result2 = _track_result([a2, (a2[0], a2[1] + offset)])
+
+        nan_mask = _apply_consensus_gates(
+            result1,
+            result2,
+            a1,
+            a2,
+            300.0,
+            self._calibration(),
+            fallback_mode=True,
+        )
+
+        assert not nan_mask.any()
+        assert not result1.consensus_rejected.any()
+        assert not result2.consensus_rejected.any()
 
 
 # ── Debug frames ───────────────────────────────────────────────────────────────
 
+
 class TestDebugFrames:
-
     def test_debug_jpeg_created_for_failed_frame(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out, \
-             tempfile.TemporaryDirectory() as dbg:
-
+        with (
+            tempfile.TemporaryDirectory() as inp,
+            tempfile.TemporaryDirectory() as out,
+            tempfile.TemporaryDirectory() as dbg,
+        ):
             _write_frame(os.path.join(inp, "frame_001.jpg"), _tri_frame())
 
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             _write_frame(os.path.join(inp, "frame_002.jpg"), bad)
 
             stabilize_folder(
-                inp, out, _tri_anchor(), _tri_anchor2(),
-                debug_dir=dbg, jpeg_quality=95,
+                inp,
+                out,
+                _tri_anchor(),
+                _tri_anchor2(),
+                debug_dir=dbg,
+                jpeg_quality=95,
             )
 
             debug_files = os.listdir(dbg)
             assert any(
-                "frame_002" in f and f.endswith("_debug.jpg")
-                for f in debug_files
+                "frame_002" in f and f.endswith("_debug.jpg") for f in debug_files
             ), f"Expected debug file for frame_002, got: {debug_files}"
 
     def test_no_debug_file_for_successful_detection(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out, \
-             tempfile.TemporaryDirectory() as dbg:
-
+        with (
+            tempfile.TemporaryDirectory() as inp,
+            tempfile.TemporaryDirectory() as out,
+            tempfile.TemporaryDirectory() as dbg,
+        ):
             _write_frame(os.path.join(inp, "frame_001.jpg"), _tri_frame())
 
             stabilize_folder(
-                inp, out, _tri_anchor(), _tri_anchor2(),
-                debug_dir=dbg, jpeg_quality=95,
+                inp,
+                out,
+                _tri_anchor(),
+                _tri_anchor2(),
+                debug_dir=dbg,
+                jpeg_quality=95,
             )
 
             assert os.listdir(dbg) == [], "No debug files expected for a successful run"
 
     def test_no_debug_dir_does_not_raise(self):
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             _write_frame(os.path.join(inp, "frame.jpg"), _tri_frame())
 
             stabilize_folder(
-                inp, out, _tri_anchor(), _tri_anchor2(),
-                debug_dir=None, jpeg_quality=95,
+                inp,
+                out,
+                _tri_anchor(),
+                _tri_anchor2(),
+                debug_dir=None,
+                jpeg_quality=95,
             )
