@@ -651,6 +651,7 @@ def stabilize_folder(
     jpeg_quality=0,
     debug_dir=None,
     border_mode="replicate",
+    strict_calibration=False,
 ):
     """Stabilize a folder of frames using two user-selected anchor points.
 
@@ -710,32 +711,65 @@ def stabilize_folder(
             "Sepáralos más para que haya suficiente base para detectar rotación."
         )
 
-    template1, anchor1_in_tpl = _build_perforation_template(first_frame, anchor1)
-    template2, anchor2_in_tpl = _build_perforation_template(first_frame, anchor2)
-    if template1 is None:
-        raise RuntimeError(
-            f"No pude extraer plantilla 1 en ({anchor1[0]:.0f}, {anchor1[1]:.0f}). "
-            "Selecciona un punto con más contraste."
+    # ── Phase 0: Calibration (R1) — sample N frames evenly across batch ──
+    # See docs/plans/2026-04-23-001-feat-stabilization-quality-pass-plan.md
+    # (Unit 1 + Unit 2). On success we use calibrated templates + spacing
+    # for tracking. On stability failure (effective_n < 20, spacing
+    # std/mean ≥ 0.10, or NCC top-p50 < 0.50), R2 fallback runs the
+    # legacy single-frame bootstrap with a "calibration-unverified"
+    # warning. Strict mode opts into hard-abort instead.
+    from calibration import run_calibration
+
+    calibration = run_calibration(files, anchor1, anchor2, log=log)
+    calibration_status = "ok"
+
+    if calibration is None:
+        if strict_calibration:
+            raise RuntimeError(
+                "Calibración falló y --strict-calibration está activo: "
+                "el batch no produjo suficientes mediciones estables "
+                "(ver logs anteriores). Desactiva strict mode para usar "
+                "el bootstrap de un solo frame con advertencia."
+            )
+        log(
+            "AVISO: calibración no verificada — usando bootstrap del primer "
+            "frame. La salida puede ser menos robusta en este batch."
         )
-    if template2 is None:
-        raise RuntimeError(
-            f"No pude extraer plantilla 2 en ({anchor2[0]:.0f}, {anchor2[1]:.0f}). "
-            "Selecciona un punto con más contraste."
-        )
+        calibration_status = "fallback"
+        template1, anchor1_in_tpl = _build_perforation_template(first_frame, anchor1)
+        template2, anchor2_in_tpl = _build_perforation_template(first_frame, anchor2)
+        if template1 is None:
+            raise RuntimeError(
+                f"No pude extraer plantilla 1 en ({anchor1[0]:.0f}, {anchor1[1]:.0f}). "
+                "Selecciona un punto con más contraste."
+            )
+        if template2 is None:
+            raise RuntimeError(
+                f"No pude extraer plantilla 2 en ({anchor2[0]:.0f}, {anchor2[1]:.0f}). "
+                "Selecciona un punto con más contraste."
+            )
+        perf_spacing = _detect_perf_spacing(first_frame, anchor1)
+        if perf_spacing is None:
+            raise RuntimeError(
+                "Calibración falló y bootstrap también: no pude detectar "
+                "el espaciado entre perforaciones en el primer frame."
+            )
+    else:
+        # Use calibrated templates and spacing. Recover anchor_in_tpl from
+        # the same builder applied to the first frame — the calibration
+        # template is the canonical observation, but `anchor_in_tpl` is
+        # template-local bookkeeping that comes from the build call.
+        template1 = calibration.template_a1
+        template2 = calibration.template_a2
+        _, anchor1_in_tpl = _build_perforation_template(first_frame, anchor1)
+        _, anchor2_in_tpl = _build_perforation_template(first_frame, anchor2)
+        perf_spacing = calibration.perf_spacing
 
     log(
         f"Plantillas: 1={template1.shape[1]}×{template1.shape[0]} en "
         f"({anchor1[0]:.0f},{anchor1[1]:.0f}); 2={template2.shape[1]}×{template2.shape[0]} "
         f"en ({anchor2[0]:.0f},{anchor2[1]:.0f}); separación={sep:.0f}px."
     )
-
-    perf_spacing = _detect_perf_spacing(first_frame, anchor1)
-    if perf_spacing is None:
-        raise RuntimeError(
-            "No pude detectar el espaciado entre perforaciones en el primer frame. "
-            "Asegúrate de que el primer punto esté sobre una perforación clara "
-            "y que el encuadre incluya al menos tres perforaciones visibles."
-        )
     log(f"Espaciado entre perforaciones: {perf_spacing:.0f}px.")
 
     search_radius = int(min(max(perf_spacing * 0.45, 80), perf_spacing - 40))
@@ -945,6 +979,29 @@ def stabilize_folder(
         "anchor_separation_px": round(sep, 1),
         "target_x": round(float(anchor1[0]), 3),
         "target_y": round(float(anchor1[1]), 3),
+        "calibration_status": calibration_status,
+        "calibration_perf_spacing_px": (
+            round(float(calibration.perf_spacing), 1) if calibration else None
+        ),
+        "calibration_ncc_median": (
+            round(float(calibration.ncc_top_p50), 4) if calibration else None
+        ),
+        "calibration_effective_n": (int(calibration.effective_n) if calibration else 0),
+        "calibration_sampled_indices": (
+            list(calibration.sampled_indices) if calibration else []
+        ),
+        "observed_median_a1_x": (
+            round(float(calibration.observed_median_a1_x), 3) if calibration else None
+        ),
+        "observed_median_a1_y": (
+            round(float(calibration.observed_median_a1_y), 3) if calibration else None
+        ),
+        "observed_median_a2_x": (
+            round(float(calibration.observed_median_a2_x), 3) if calibration else None
+        ),
+        "observed_median_a2_y": (
+            round(float(calibration.observed_median_a2_y), 3) if calibration else None
+        ),
         "output_width": out_w,
         "output_height": out_h,
         "output_format": "png (lossless)"

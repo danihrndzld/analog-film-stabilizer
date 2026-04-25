@@ -199,6 +199,58 @@ class TestCalibrationStability:
             )
 
 
+class TestStabilizeFolderCalibrationIntegration:
+    """End-to-end coverage of Unit 2 — calibration wired into stabilize_folder.
+
+    These tests drive the full `stabilize_folder` pipeline against batches
+    sized for both the calibration-success path (≥22 frames) and the R2
+    fallback path (small batches). The synthetic frames are static, so the
+    output is uninteresting visually — the assertions are on summary fields
+    and run-completion, not pixel content.
+    """
+
+    def _drive_stabilize_folder(self, n_frames, *, strict=False):
+        from perforation_stabilizer_app import stabilize_folder
+
+        with tempfile.TemporaryDirectory() as td:
+            inp = os.path.join(td, "input")
+            out = os.path.join(td, "output")
+            os.makedirs(inp, exist_ok=True)
+            for i in range(n_frames):
+                _write_frame(os.path.join(inp, f"frame_{i:04d}.jpg"), _tri_frame())
+            return stabilize_folder(
+                input_dir=inp,
+                output_dir=out,
+                anchor1=_perf_centroid(0.5),
+                anchor2=_perf_centroid(0.2),
+                strict_calibration=strict,
+            )
+
+    def test_calibration_ok_path_on_22_frame_batch(self):
+        summary = self._drive_stabilize_folder(n_frames=22)
+        assert summary["calibration_status"] == "ok"
+        assert summary["calibration_effective_n"] >= 20
+        assert summary["calibration_perf_spacing_px"] is not None
+        assert summary["calibration_ncc_median"] is not None
+        # target_x/y still echo the user click (Decision C5).
+        click = _perf_centroid(0.5)
+        assert abs(summary["target_x"] - click[0]) < 1
+        assert abs(summary["target_y"] - click[1]) < 1
+
+    def test_fallback_path_on_small_batch(self):
+        summary = self._drive_stabilize_folder(n_frames=5)
+        assert summary["calibration_status"] == "fallback"
+        # Calibration fields are degraded but present.
+        assert summary["calibration_effective_n"] == 0
+        assert summary["calibration_perf_spacing_px"] is None
+        # Pipeline still produced output.
+        assert summary["total_frames"] == 5
+
+    def test_strict_mode_aborts_on_calibration_failure(self):
+        with pytest.raises(RuntimeError, match="strict-calibration"):
+            self._drive_stabilize_folder(n_frames=5, strict=True)
+
+
 class TestCalibrationLogging:
     """Verify log messages communicate calibration progress and failures."""
 

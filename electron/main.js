@@ -124,27 +124,33 @@ ipcMain.handle('start-process', (event, opts) => {
     const binaryName = process.arch === 'arm64' ? 'stabilizer_arm64' : 'stabilizer_x64';
     executable = path.join(process.resourcesPath, binaryName);
     args = [
-      '--input',    opts.input,
-      '--output',   opts.output,
-      '--anchor-x', String(opts.anchorX),
-      '--anchor-y', String(opts.anchorY),
-      '--quality',  String(opts.quality),
+      '--input',     opts.input,
+      '--output',    opts.output,
+      '--anchor1-x', String(opts.anchor1X),
+      '--anchor1-y', String(opts.anchor1Y),
+      '--anchor2-x', String(opts.anchor2X),
+      '--anchor2-y', String(opts.anchor2Y),
+      '--quality',   String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
     if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
+    if (opts.strictCalibration) args.push('--strict-calibration');
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
     args = [
       scriptPath,
-      '--input',    opts.input,
-      '--output',   opts.output,
-      '--anchor-x', String(opts.anchorX),
-      '--anchor-y', String(opts.anchorY),
-      '--quality',  String(opts.quality),
+      '--input',     opts.input,
+      '--output',    opts.output,
+      '--anchor1-x', String(opts.anchor1X),
+      '--anchor1-y', String(opts.anchor1Y),
+      '--anchor2-x', String(opts.anchor2X),
+      '--anchor2-y', String(opts.anchor2Y),
+      '--quality',   String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
     if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
+    if (opts.strictCalibration) args.push('--strict-calibration');
   }
 
   pyProcess = spawn(executable, args);

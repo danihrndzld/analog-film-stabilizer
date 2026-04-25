@@ -5,7 +5,8 @@ Streams JSON-lines to stdout so Electron can consume progress and logs.
 
 Modes:
   batch (default)
-    --input DIR --output DIR --anchor-x N --anchor-y N
+    --input DIR --output DIR
+    --anchor1-x N --anchor1-y N --anchor2-x N --anchor2-y N
     [--quality N] [--debug-frames DIR] [--border-mode STR]
 
   preview
@@ -53,18 +54,21 @@ def run_preview(args):
 
 def run_batch(args):
     """Run the full stabilisation batch."""
-    anchor = (args.anchor_x, args.anchor_y)
+    anchor1 = (args.anchor1_x, args.anchor1_y)
+    anchor2 = (args.anchor2_x, args.anchor2_y)
 
     try:
         summary = stabilize_folder(
             input_dir=args.input,
             output_dir=args.output,
-            anchor=anchor,
+            anchor1=anchor1,
+            anchor2=anchor2,
             progress_cb=lambda v: emit({"type": "progress", "value": v}),
             log_cb=lambda m: emit({"type": "log", "msg": m}),
             jpeg_quality=args.quality,
             debug_dir=args.debug_frames,
             border_mode=args.border_mode,
+            strict_calibration=args.strict_calibration,
         )
         emit({"type": "done", "summary": summary})
     except Exception as exc:
@@ -87,16 +91,28 @@ def main():
     parser.add_argument("--input", default=None, help="Input folder with frames")
     parser.add_argument("--output", default=None, help="Output folder")
     parser.add_argument(
-        "--anchor-x",
+        "--anchor1-x",
         type=float,
         default=None,
-        help="Reference anchor X coordinate (required for batch)",
+        help="First anchor X coordinate (required for batch)",
     )
     parser.add_argument(
-        "--anchor-y",
+        "--anchor1-y",
         type=float,
         default=None,
-        help="Reference anchor Y coordinate (required for batch)",
+        help="First anchor Y coordinate (required for batch)",
+    )
+    parser.add_argument(
+        "--anchor2-x",
+        type=float,
+        default=None,
+        help="Second anchor X coordinate (required for batch)",
+    )
+    parser.add_argument(
+        "--anchor2-y",
+        type=float,
+        default=None,
+        help="Second anchor Y coordinate (required for batch)",
     )
     parser.add_argument(
         "--quality", type=int, default=95, help="JPEG quality 1-100, 0=PNG (default 95)"
@@ -112,6 +128,17 @@ def main():
         choices=["replicate", "constant", "reflect"],
         default="replicate",
         help="Border fill mode for warpAffine (default: replicate)",
+    )
+    parser.add_argument(
+        "--strict-calibration",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-abort on calibration failure instead of falling back to "
+            "single-frame bootstrap. Default off — Diego's workflow always "
+            "produces some output, with a 'calibration-unverified' warning "
+            "when calibration cannot stabilize."
+        ),
     )
 
     # ── Preview-mode params ───────────────────────────────────────────────────
@@ -143,11 +170,19 @@ def main():
                 }
             )
             sys.exit(1)
-        if args.anchor_x is None or args.anchor_y is None:
+        if (
+            args.anchor1_x is None
+            or args.anchor1_y is None
+            or args.anchor2_x is None
+            or args.anchor2_y is None
+        ):
             emit(
                 {
                     "type": "error",
-                    "msg": "--anchor-x and --anchor-y are required in batch mode",
+                    "msg": (
+                        "--anchor1-x, --anchor1-y, --anchor2-x and --anchor2-y "
+                        "are required in batch mode"
+                    ),
                 }
             )
             sys.exit(1)
