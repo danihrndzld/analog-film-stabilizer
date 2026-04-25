@@ -591,6 +591,9 @@ class TestAnchorWorkflow:
             assert "total_frames" in content
             assert "anchor1_ref" in content
             assert "anchor2_ref" in content
+            assert "calibration_status" in content
+            assert "consensus_rejected_frames_a1" in content
+            assert "nan_filled_frames" in content
             assert "film_format" not in content
 
     def test_stabilize_single_frame(self):

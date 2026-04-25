@@ -327,6 +327,11 @@ function setProgress(ratio) {
   progressBar.setAttribute('aria-valuenow', pct);
 }
 
+function finiteNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // ── IPC listeners ─────────────────────────────────────────────────────────────
 window.api.onProgress((v) => setProgress(v));
 
@@ -336,22 +341,44 @@ window.api.onDone((summary) => {
   setRunning(false);
   setProgress(1);
   progressFill.classList.add('is-done');
-  const amb1 = summary.ambiguous_frames_a1 ?? 0;
-  const amb2 = summary.ambiguous_frames_a2 ?? 0;
-  const rej1 = summary.motion_rejected_frames_a1 ?? 0;
-  const rej2 = summary.motion_rejected_frames_a2 ?? 0;
-  const outliers = summary.outlier_frames_replaced ?? 0;
-  const splices = summary.splice_count ?? 0;
+  const total = finiteNumber(summary.total_frames);
+  const detectedBoth = finiteNumber(summary.detected_both_frames);
+  const incomplete = finiteNumber(summary.failed_frames_both_required);
+  const amb1 = finiteNumber(summary.ambiguous_frames_a1);
+  const amb2 = finiteNumber(summary.ambiguous_frames_a2);
+  const motion1 = finiteNumber(summary.motion_rejected_frames_a1);
+  const motion2 = finiteNumber(summary.motion_rejected_frames_a2);
+  const consensus1 = finiteNumber(summary.consensus_rejected_frames_a1);
+  const consensus2 = finiteNumber(summary.consensus_rejected_frames_a2);
+  const nanFilled = finiteNumber(summary.nan_filled_frames);
+  const outliers = finiteNumber(summary.outlier_frames_replaced);
+  const splices = finiteNumber(summary.splice_count);
+  const calibrationSamples = finiteNumber(summary.calibration_effective_n);
+  const calibrationSpacing = finiteNumber(summary.calibration_perf_spacing_px);
+  const outputWidth = finiteNumber(summary.output_width);
+  const outputHeight = finiteNumber(summary.output_height);
+  const calibrationStatus = summary.calibration_status === 'fallback' ? 'fallback' : 'ok';
   const parts = [
-    `${summary.total_frames} frames`,
-    `${summary.detected_both_frames} con ambos anclajes`,
-    `${summary.failed_frames_both_required} sin detección completa`,
+    `${total} frames`,
+    `${detectedBoth} con ambos anclajes`,
   ];
+  if (incomplete > 0) parts.push(`${incomplete} sin detección completa`);
+  if (calibrationStatus === 'fallback') {
+    parts.push('calibración no verificada');
+  } else if (calibrationSamples > 0) {
+    const spacing = calibrationSpacing > 0 ? `, ${Math.round(calibrationSpacing)}px` : '';
+    parts.push(`calibración ${calibrationSamples} muestras${spacing}`);
+  }
   if (amb1 + amb2 > 0) parts.push(`${amb1 + amb2} ambiguos`);
-  if (rej1 + rej2 > 0) parts.push(`${rej1 + rej2} rechazadas por movimiento`);
+  if (motion1 + motion2 > 0) parts.push(`${motion1 + motion2} rechazadas por movimiento`);
+  if (consensus1 + consensus2 > 0) parts.push(`${consensus1 + consensus2} rechazadas por consenso`);
+  if (nanFilled > 0) parts.push(`${nanFilled} rellenadas por suavizado`);
   if (outliers > 0) parts.push(`${outliers} outliers suavizados`);
   if (splices > 0) parts.push(`${splices} splice(s)`);
-  parts.push(`salida: ${summary.output_width}×${summary.output_height} px`);
+  parts.push(`salida: ${outputWidth}×${outputHeight} px`);
+  if (calibrationStatus === 'fallback') {
+    addLog('Calibración no verificada: se usó bootstrap del primer frame.', 'warning');
+  }
   addLog(`Listo — ${parts.join(' · ')}`, 'success');
 });
 

@@ -605,6 +605,7 @@ html, body {
 
 .log-line--error   { color: var(--red);   }
 .log-line--success { color: var(--green); }
+.log-line--warning { color: var(--amber); }
 
 .log-ts {
   color: var(--text-faint);
