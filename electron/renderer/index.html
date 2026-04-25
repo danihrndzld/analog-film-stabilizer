@@ -118,15 +118,17 @@
       <section class="preview-section" id="previewSection" hidden
                aria-label="Selección de punto de referencia">
         <div class="preview-header">
-          <span class="preview-label">Selecciona punto de referencia</span>
+          <span class="preview-label" id="previewLabel">Selecciona dos puntos de referencia</span>
           <span class="preview-status" id="previewStatus">Cargando…</span>
+          <button type="button" class="preview-reset" id="resetAnchorsBtn" hidden>Reiniciar puntos</button>
         </div>
         <div class="preview-img-wrap" id="previewImgWrap">
           <img class="preview-img" id="previewImg"
-               alt="Vista previa del primer frame — haz clic para seleccionar referencia">
-          <div class="anchor-dot" id="anchorDot" hidden aria-hidden="true"></div>
+               alt="Vista previa del primer frame — haz clic para seleccionar referencias">
+          <div class="anchor-dot anchor-dot--1" id="anchorDot1" hidden aria-hidden="true"></div>
+          <div class="anchor-dot anchor-dot--2" id="anchorDot2" hidden aria-hidden="true"></div>
         </div>
-        <p class="preview-hint">Haz clic en la imagen para seleccionar el punto de referencia</p>
+        <p class="preview-hint">Haz clic para marcar el primer punto, luego un segundo punto bien separado del primero.</p>
       </section>
 
       <!-- Advanced params -->

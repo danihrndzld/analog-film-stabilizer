@@ -709,6 +709,27 @@ html, body {
   box-shadow: 0 0 0 1px var(--red), inset 0 0 0 0 transparent;
 }
 
+/* Second anchor dot uses a distinct hue so the two references are visually paired */
+.anchor-dot--2 {
+  background: oklch(70% 0.15 220 / 0.18);
+  box-shadow: 0 0 0 1px oklch(60% 0.17 220), inset 0 0 0 0 transparent;
+}
+
+.preview-reset {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.preview-reset:hover {
+  background: var(--border);
+}
+
 /* Crosshair lines inside the anchor area */
 .anchor-dot::before,
 .anchor-dot::after {

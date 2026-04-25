@@ -20,8 +20,15 @@ const debugFramesPathEl = document.getElementById('debugFramesPath');
 // ── Preview panel refs ────────────────────────────────────────────────────────
 const previewSection    = document.getElementById('previewSection');
 const previewStatusEl   = document.getElementById('previewStatus');
+const previewLabelEl    = document.getElementById('previewLabel');
 const previewImg        = document.getElementById('previewImg');
-const anchorDot         = document.getElementById('anchorDot');
+const anchorDot1        = document.getElementById('anchorDot1');
+const anchorDot2        = document.getElementById('anchorDot2');
+const resetAnchorsBtn   = document.getElementById('resetAnchorsBtn');
+
+// Min anchor separation as a fraction of min(frame_w, frame_h). Must match
+// MIN_ANCHOR_SEPARATION_FRAC in src/perforation_stabilizer_app.py.
+const MIN_ANCHOR_SEPARATION_FRAC = 0.25;
 
 // ── Version badge ─────────────────────────────────────────────────────────────
 const versionBadge = document.getElementById('appVersion');
@@ -55,7 +62,8 @@ window.api.onUpdateNotFound(() => {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let isRunning     = false;
-let previewAnchor = null;   // null | { x, y } in frame coords
+// Two-anchor selection state. step tracks which click comes next.
+let anchorState   = { step: 1, anchor1: null, anchor2: null };
 let folderReady   = false;  // true when a valid folder has been selected
 
 // ── Prevent Electron from navigating when files land outside the drop zone ────
@@ -161,14 +169,28 @@ function setInputFolder(folderPath) {
 
 // ── Run button state ──────────────────────────────────────────────────────────
 function updateRunButton() {
-  // Enabled only when both folder is selected AND anchor is set
-  const canRun = folderReady && previewAnchor !== null && !isRunning;
+  // Enabled only when folder selected AND both anchors set
+  const canRun = folderReady
+    && anchorState.anchor1 !== null
+    && anchorState.anchor2 !== null
+    && !isRunning;
   runBtn.disabled = !canRun;
   if (canRun) {
     runBtn.removeAttribute('aria-disabled');
   } else {
     runBtn.setAttribute('aria-disabled', 'true');
   }
+}
+
+function resetAnchors() {
+  anchorState = { step: 1, anchor1: null, anchor2: null };
+  anchorDot1.hidden = true;
+  anchorDot2.hidden = true;
+  resetAnchorsBtn.hidden = true;
+  if (previewImg.naturalWidth) {
+    previewStatusEl.textContent = 'Haz clic para marcar el primer punto';
+  }
+  updateRunButton();
 }
 
 // ── Preview panel ─────────────────────────────────────────────────────────────
@@ -178,9 +200,7 @@ async function triggerPreview() {
   if (!input) return;
 
   // Reset anchor state for new folder
-  previewAnchor = null;
-  anchorDot.hidden = true;
-  updateRunButton();
+  resetAnchors();
 
   previewSection.hidden = false;
   previewStatusEl.textContent = 'Cargando…';
@@ -206,10 +226,10 @@ async function triggerPreview() {
     previewImg.src = 'file://' + result.previewPath + '?t=' + Date.now();
   }
 
-  previewStatusEl.textContent = 'Haz clic para seleccionar referencia';
+  previewStatusEl.textContent = 'Haz clic para marcar el primer punto';
 }
 
-// Click-to-set-anchor: map click position back to frame coordinates
+// Click-to-set-anchor: two guided clicks with min-separation validation
 previewImg.addEventListener('click', (e) => {
   if (!previewImg.naturalWidth) return;  // image not yet loaded
   const scaleX = previewImg.naturalWidth  / previewImg.offsetWidth;
@@ -217,17 +237,40 @@ previewImg.addEventListener('click', (e) => {
   const frameX = e.offsetX * scaleX;
   const frameY = e.offsetY * scaleY;
 
-  previewAnchor = { x: frameX, y: frameY };
-
-  anchorDot.style.left = e.offsetX + 'px';
-  anchorDot.style.top  = e.offsetY + 'px';
-  anchorDot.hidden = false;
-
-  previewStatusEl.textContent =
-    `Referencia: (${Math.round(frameX)}, ${Math.round(frameY)})`;
-
-  updateRunButton();
+  if (anchorState.step === 1) {
+    anchorState.anchor1 = { x: frameX, y: frameY };
+    anchorDot1.style.left = e.offsetX + 'px';
+    anchorDot1.style.top  = e.offsetY + 'px';
+    anchorDot1.hidden = false;
+    anchorState.step = 2;
+    resetAnchorsBtn.hidden = false;
+    previewStatusEl.textContent =
+      `Punto 1: (${Math.round(frameX)}, ${Math.round(frameY)}). Ahora marca el segundo punto, bien separado.`;
+  } else if (anchorState.step === 2) {
+    // Validate separation against min_sep in frame coords.
+    const a1 = anchorState.anchor1;
+    const dx = frameX - a1.x;
+    const dy = frameY - a1.y;
+    const sep = Math.hypot(dx, dy);
+    const minSep = MIN_ANCHOR_SEPARATION_FRAC
+      * Math.min(previewImg.naturalWidth, previewImg.naturalHeight);
+    if (sep < minSep) {
+      previewStatusEl.textContent =
+        `Muy cerca del primer punto (${Math.round(sep)}px < ${Math.round(minSep)}px). Elige uno más alejado.`;
+      return;
+    }
+    anchorState.anchor2 = { x: frameX, y: frameY };
+    anchorDot2.style.left = e.offsetX + 'px';
+    anchorDot2.style.top  = e.offsetY + 'px';
+    anchorDot2.hidden = false;
+    anchorState.step = 'done';
+    previewStatusEl.textContent =
+      `Referencias listas: (${Math.round(a1.x)}, ${Math.round(a1.y)}) · (${Math.round(frameX)}, ${Math.round(frameY)})`;
+    updateRunButton();
+  }
 });
+
+resetAnchorsBtn.addEventListener('click', resetAnchors);
 
 // ── Run / Cancel ──────────────────────────────────────────────────────────────
 runBtn.addEventListener('click', () => {
@@ -241,7 +284,7 @@ runBtn.addEventListener('click', () => {
 function startProcess() {
   const input  = inputPathEl.value.trim();
   const output = outputPathEl.value.trim();
-  if (!input || !output || !previewAnchor) return;
+  if (!input || !output || !anchorState.anchor1 || !anchorState.anchor2) return;
 
   setRunning(true);
   setProgress(0);
@@ -254,8 +297,10 @@ function startProcess() {
     output,
     quality:     (q => Number.isFinite(q) ? q : 95)(parseInt(document.getElementById('paramQuality').value, 10)),
     debugFrames: debugFramesPathEl.value.trim(),
-    anchorX:     previewAnchor.x,
-    anchorY:     previewAnchor.y,
+    anchor1X:    anchorState.anchor1.x,
+    anchor1Y:    anchorState.anchor1.y,
+    anchor2X:    anchorState.anchor2.x,
+    anchor2Y:    anchorState.anchor2.y,
     borderMode:  document.getElementById('paramBorderMode').value || 'replicate',
   });
 }
@@ -291,14 +336,21 @@ window.api.onDone((summary) => {
   setRunning(false);
   setProgress(1);
   progressFill.classList.add('is-done');
-  const ambiguous = summary.ambiguous_frames ?? 0;
-  const rejected = summary.motion_rejected_frames ?? 0;
+  const amb1 = summary.ambiguous_frames_a1 ?? 0;
+  const amb2 = summary.ambiguous_frames_a2 ?? 0;
+  const rej1 = summary.motion_rejected_frames_a1 ?? 0;
+  const rej2 = summary.motion_rejected_frames_a2 ?? 0;
+  const outliers = summary.outlier_frames_replaced ?? 0;
+  const splices = summary.splice_count ?? 0;
   const parts = [
     `${summary.total_frames} frames`,
-    `${summary.failed_detections} sin detección`,
+    `${summary.detected_both_frames} con ambos anclajes`,
+    `${summary.failed_frames_both_required} sin detección completa`,
   ];
-  if (ambiguous > 0) parts.push(`${ambiguous} ambiguos`);
-  if (rejected > 0) parts.push(`${rejected} rechazadas por movimiento (fuera de rango)`);
+  if (amb1 + amb2 > 0) parts.push(`${amb1 + amb2} ambiguos`);
+  if (rej1 + rej2 > 0) parts.push(`${rej1 + rej2} rechazadas por movimiento`);
+  if (outliers > 0) parts.push(`${outliers} outliers suavizados`);
+  if (splices > 0) parts.push(`${splices} splice(s)`);
   parts.push(`salida: ${summary.output_width}×${summary.output_height} px`);
   addLog(`Listo — ${parts.join(' · ')}`, 'success');
 });
