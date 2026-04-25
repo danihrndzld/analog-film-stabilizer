@@ -135,6 +135,10 @@ ipcMain.handle('start-process', (event, opts) => {
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
     if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
     if (opts.strictCalibration) args.push('--strict-calibration');
+    if (opts.rejectCeiling !== undefined && opts.rejectCeiling !== null && opts.rejectCeiling !== '') {
+      args.push('--reject-ceiling', String(opts.rejectCeiling));
+    }
+    if (opts.strictHealthCheck) args.push('--strict-health-check');
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
@@ -151,6 +155,10 @@ ipcMain.handle('start-process', (event, opts) => {
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
     if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
     if (opts.strictCalibration) args.push('--strict-calibration');
+    if (opts.rejectCeiling !== undefined && opts.rejectCeiling !== null && opts.rejectCeiling !== '') {
+      args.push('--reject-ceiling', String(opts.rejectCeiling));
+    }
+    if (opts.strictHealthCheck) args.push('--strict-health-check');
   }
 
   pyProcess = spawn(executable, args);

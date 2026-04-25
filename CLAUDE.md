@@ -42,16 +42,21 @@ The client scans analog film (3500–3800 frames per folder) and currently stabi
 
 ### Python backend (`src/perforation_stabilizer_app.py`)
 
-Pure processing module (no UI). Two-stage pipeline:
+Pure processing module (no UI). Main pipeline:
 
-1. **Template building** — `_build_perforation_template()` extracts a grayscale patch (default 60px radius) around the user-selected anchor point from the first frame. This patch becomes the reference template for alignment.
+1. **Calibration/template building** — `run_calibration()` samples the batch to build calibrated templates and perforation spacing. If calibration cannot stabilize, normal mode falls back to first-frame bootstrap with a warning; `strict_calibration=True` aborts.
 
-2. **Stabilization pass** — `stabilize_folder()` requires a user-provided `anchor` (x, y) tuple. It builds the template from the first frame, then uses `_template_match_candidates()` (normalized cross-correlation with sub-pixel precision via parabolic fitting, top-K peaks) plus motion-predictor ranking (`_rank_candidates`) to locate the anchor in every frame. Ambiguous frames reuse the predicted position; motion-rejected frames are interpolated from neighbors. Each frame is translated (no rotation) to lock the anchor to a fixed pixel position. The user's anchor IS the target position.
+2. **Two-anchor stabilization pass** — `stabilize_folder()` requires `anchor1` and `anchor2` `(x, y)` tuples. Each anchor is tracked independently with `_template_match_candidates()` (normalized cross-correlation with sub-pixel precision via parabolic fitting, top-K peaks), motion-predictor ranking (`_rank_candidates`), and pair-consensus gates. Raw transforms use both anchors when available, fall back to translation-only from one surviving anchor, then pass through splice-aware smoothing before warp. The warp remains translation-only.
+
+3. **R13 health check** — after Pass 1 and splice detection, the pipeline computes rejection pressure from motion rejections, consensus rejections, and NaN-filled frames. Normal mode logs/report-writes a warning above `reject_ceiling`; `strict_health_check=True` raises `HealthCheckError`.
 
 Key parameters:
-- **`anchor`**: (x, y) tuple — user-selected reference point (required)
+- **`anchor1`, `anchor2`**: (x, y) tuples — user-selected reference points (required)
 - **`jpeg_quality`**: JPEG 1–100 or `0` for PNG lossless
 - **`border_mode`**: `'replicate'`, `'constant'`, or `'reflect'`
+- **`strict_calibration`**: hard-abort instead of calibration fallback
+- **`reject_ceiling`**: R13 rejection-rate warning threshold, default `0.20`
+- **`strict_health_check`**: hard-abort when R13 exceeds `reject_ceiling`
 
 Debug frames: pass `debug_dir` to `stabilize_folder()` to get `_debug.jpg` patches for failed template matches.
 
@@ -65,7 +70,9 @@ Used by the Electron UI. Two modes, both emit JSON-lines to stdout:
 
 **Batch mode** (default):
 ```
---input DIR --output DIR --anchor-x N --anchor-y N [--quality N] [--debug-frames DIR] [--border-mode STR]
+--input DIR --output DIR --anchor1-x N --anchor1-y N --anchor2-x N --anchor2-y N
+[--quality N] [--debug-frames DIR] [--border-mode STR]
+[--strict-calibration] [--reject-ceiling 0.20] [--strict-health-check]
 ```
 
 **Preview mode** (saves first frame as preview JPEG):
@@ -76,7 +83,7 @@ Used by the Electron UI. Two modes, both emit JSON-lines to stdout:
 ### CI / Build
 `.github/workflows/build.yml` builds macOS DMGs (arm64 + x64) on every push to `main` and on version tags (`v*`) using electron-builder. CI also runs `ruff check` and `ruff format --check` on `src/`. Python is bundled into standalone binaries via PyInstaller (separate arm64/x64 builds). Tagged builds create a GitHub Release. Version is synced from the git tag to `package.json` automatically by CI.
 
-Output is written to a sibling folder suffixed `_ESTABILIZADO`, plus a `stabilization_report.txt` with frame count, failed detections, anchor coords, output dimensions, and output format.
+Output is written to a sibling folder suffixed `_ESTABILIZADO`, plus a `stabilization_report.txt` with frame count, rejection counters, calibration/health status, anchor coords, output dimensions, and output format.
 
 ## Documented Solutions
 

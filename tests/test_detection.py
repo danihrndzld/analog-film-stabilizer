@@ -5,6 +5,7 @@ needed.  The user provides an anchor point (x, y) on the first frame, and
 template matching tracks that point across all frames.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -17,11 +18,13 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from perforation_stabilizer_app import (
+    HealthCheckError,
     TrackPassResult,
     _apply_consensus_gates,
     _build_perforation_template,
     _detect_perf_bbox,
     _detect_perf_spacing,
+    _evaluate_health_check,
     _extract_top_k_peaks,
     _FrameOutcome,
     _locate_anchor_in_frame,
@@ -594,6 +597,7 @@ class TestAnchorWorkflow:
             assert "calibration_status" in content
             assert "consensus_rejected_frames_a1" in content
             assert "nan_filled_frames" in content
+            assert "health_check" in content
             assert "film_format" not in content
 
     def test_stabilize_single_frame(self):
@@ -686,6 +690,9 @@ class TestTwoAnchorStabilization:
                 "consensus_rejected_frames_a1",
                 "consensus_rejected_frames_a2",
                 "nan_filled_frames",
+                "health_check",
+                "health_check_rate",
+                "health_check_dominant_mode",
                 "failed_detections_a1",
                 "failed_detections_a2",
                 "outlier_frames_replaced",
@@ -846,6 +853,151 @@ class TestAnchorPairConsensus:
         assert not nan_mask.any()
         assert not result1.consensus_rejected.any()
         assert not result2.consensus_rejected.any()
+
+
+# ── R13 health check ─────────────────────────────────────────────────────────
+
+
+class TestHealthCheck:
+    def test_passes_under_reject_ceiling(self):
+        health = _evaluate_health_check(
+            n_frames=100,
+            motion_rejected_total=3,
+            consensus_rejected_total=1,
+            nan_filled_frames=1,
+            reject_ceiling=0.20,
+        )
+
+        assert health["health_check"] == "ok"
+        assert health["health_check_numerator"] == 5
+        assert health["health_check_rate"] == 0.05
+
+    def test_warns_above_reject_ceiling_and_reports_dominant_mode(self):
+        health = _evaluate_health_check(
+            n_frames=100,
+            motion_rejected_total=3,
+            consensus_rejected_total=15,
+            nan_filled_frames=3,
+            reject_ceiling=0.20,
+        )
+
+        assert health["health_check"] == "warning"
+        assert health["health_check_numerator"] == 21
+        assert health["health_check_rate"] == 0.21
+        assert health["health_check_dominant_mode"] == "consensus_rejected"
+
+    def test_zero_denominator_passes(self):
+        health = _evaluate_health_check(
+            n_frames=0,
+            motion_rejected_total=0,
+            consensus_rejected_total=0,
+            nan_filled_frames=0,
+            reject_ceiling=0.20,
+        )
+
+        assert health["health_check"] == "ok"
+        assert health["health_check_rate"] == 0.0
+        assert health["health_check_dominant_mode"] == "none"
+
+    def test_fallback_mode_skips_even_when_reject_rate_is_high(self):
+        health = _evaluate_health_check(
+            n_frames=100,
+            motion_rejected_total=10,
+            consensus_rejected_total=10,
+            nan_filled_frames=10,
+            reject_ceiling=0.20,
+            fallback_mode=True,
+        )
+
+        assert health["health_check"] == "skipped"
+        assert health["health_check_rate"] == 0.30
+
+    def test_health_check_error_exposes_structured_attributes(self):
+        err = HealthCheckError(
+            numerator=21,
+            denominator=100,
+            rate=0.21,
+            dominant_mode="consensus_rejected",
+            ceiling=0.20,
+        )
+
+        assert isinstance(err, RuntimeError)
+        assert err.numerator == 21
+        assert err.denominator == 100
+        assert err.rate == 0.21
+        assert err.dominant_mode == "consensus_rejected"
+        assert err.ceiling == 0.20
+
+    def test_cli_emits_health_check_error_subtype(self, monkeypatch, capsys):
+        import stabilizer_cli
+
+        def raise_health_check(**_kwargs):
+            raise HealthCheckError(
+                numerator=21,
+                denominator=100,
+                rate=0.21,
+                dominant_mode="consensus_rejected",
+                ceiling=0.20,
+            )
+
+        monkeypatch.setattr(stabilizer_cli, "stabilize_folder", raise_health_check)
+
+        with pytest.raises(SystemExit) as exc:
+            stabilizer_cli.run_batch(
+                SimpleNamespace(
+                    input="in",
+                    output="out",
+                    anchor1_x=1.0,
+                    anchor1_y=2.0,
+                    anchor2_x=3.0,
+                    anchor2_y=4.0,
+                    quality=95,
+                    debug_frames=None,
+                    border_mode="replicate",
+                    strict_calibration=False,
+                    reject_ceiling=0.20,
+                    strict_health_check=True,
+                )
+            )
+
+        assert exc.value.code == 1
+        msg = json.loads(capsys.readouterr().out.strip())
+        assert msg["type"] == "error"
+        assert msg["subtype"] == "health_check"
+        assert msg["dominant_mode"] == "consensus_rejected"
+
+    def test_cli_passes_health_check_options(self, monkeypatch, capsys):
+        import stabilizer_cli
+
+        captured = {}
+
+        def fake_stabilize_folder(**kwargs):
+            captured.update(kwargs)
+            return {"total_frames": 0}
+
+        monkeypatch.setattr(stabilizer_cli, "stabilize_folder", fake_stabilize_folder)
+
+        stabilizer_cli.run_batch(
+            SimpleNamespace(
+                input="in",
+                output="out",
+                anchor1_x=1.0,
+                anchor1_y=2.0,
+                anchor2_x=3.0,
+                anchor2_y=4.0,
+                quality=95,
+                debug_frames=None,
+                border_mode="replicate",
+                strict_calibration=False,
+                reject_ceiling=0.50,
+                strict_health_check=True,
+            )
+        )
+
+        msg = json.loads(capsys.readouterr().out.strip())
+        assert msg["type"] == "done"
+        assert captured["reject_ceiling"] == 0.50
+        assert captured["strict_health_check"] is True
 
 
 # ── Debug frames ───────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import numpy as np
 from trajectory_smoothing import detect_splices, rigid_fit_2pt, smooth_trajectory
 
 VALID_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
+DEFAULT_REJECT_CEILING = 0.20
 
 
 def list_images(folder):
@@ -50,6 +51,23 @@ class TrackPassResult:
     consensus_rejected: np.ndarray  # bool, populated in Unit 5
     failed_mask: np.ndarray  # bool
     outcomes: list[Any]  # list[_FrameOutcome | None]
+
+
+class HealthCheckError(RuntimeError):
+    """Raised when strict R13 health checking blocks a risky stabilization run."""
+
+    def __init__(self, *, numerator, denominator, rate, dominant_mode, ceiling):
+        self.numerator = int(numerator)
+        self.denominator = int(denominator)
+        self.rate = float(rate)
+        self.dominant_mode = str(dominant_mode)
+        self.ceiling = float(ceiling)
+        super().__init__(
+            "R13 health check failed: "
+            f"{self.rate:.1%} rejected "
+            f"({self.numerator}/{self.denominator}, "
+            f"ceiling {self.ceiling:.1%}, dominant={self.dominant_mode})"
+        )
 
 
 # ── Template matching alignment ──────────────────────────────────────────────
@@ -771,6 +789,84 @@ def _apply_consensus_gates(
     return nan_filled
 
 
+def _evaluate_health_check(
+    *,
+    n_frames,
+    motion_rejected_total,
+    consensus_rejected_total,
+    nan_filled_frames,
+    reject_ceiling=DEFAULT_REJECT_CEILING,
+    fallback_mode=False,
+):
+    """Compute the R13 Pass-1 health-check status from disjoint counters."""
+
+    ceiling = float(reject_ceiling)
+    if ceiling < 0:
+        raise ValueError("reject_ceiling must be non-negative")
+
+    denominator = int(n_frames)
+    motion_total = int(motion_rejected_total)
+    consensus_total = int(consensus_rejected_total)
+    nan_filled = int(nan_filled_frames)
+    numerator = motion_total + consensus_total + nan_filled
+    rate = numerator / denominator if denominator > 0 else 0.0
+
+    dominant_counts = {
+        "motion_rejected": motion_total,
+        "consensus_rejected": consensus_total,
+        "nan_filled": nan_filled,
+    }
+    dominant_mode = max(dominant_counts, key=dominant_counts.get)
+    if dominant_counts[dominant_mode] == 0:
+        dominant_mode = "none"
+
+    if fallback_mode:
+        status = "skipped"
+    elif denominator > 0 and rate > ceiling:
+        status = "warning"
+    else:
+        status = "ok"
+
+    return {
+        "health_check": status,
+        "health_check_numerator": numerator,
+        "health_check_denominator": denominator,
+        "health_check_rate": round(float(rate), 6),
+        "health_check_ceiling": round(ceiling, 6),
+        "health_check_dominant_mode": dominant_mode,
+    }
+
+
+def _format_health_check_warning(health):
+    dominant_labels = {
+        "motion_rejected": "rechazos por movimiento",
+        "consensus_rejected": "rechazos por consenso",
+        "nan_filled": "frames rellenados por suavizado",
+    }
+    dominant = dominant_labels.get(
+        health["health_check_dominant_mode"], health["health_check_dominant_mode"]
+    )
+    return (
+        "AVISO R13: health-check en warning; "
+        f"{health['health_check_rate']:.1%} rechazado "
+        f"({health['health_check_numerator']}/"
+        f"{health['health_check_denominator']}, "
+        f"límite {health['health_check_ceiling']:.1%}). "
+        f"Dominan {dominant}; considera re-clickear los anclajes "
+        "o usar --strict-health-check para abortar estos batches."
+    )
+
+
+def _write_stabilization_report(output_dir, summary):
+    with open(
+        os.path.join(output_dir, "stabilization_report.txt"), "w", encoding="utf-8"
+    ) as f:
+        f.write("PERFORATION STABILIZATION REPORT\n")
+        f.write("================================\n")
+        for k, v in summary.items():
+            f.write(f"{k}: {v}\n")
+
+
 def stabilize_folder(
     input_dir,
     output_dir,
@@ -782,6 +878,8 @@ def stabilize_folder(
     debug_dir=None,
     border_mode="replicate",
     strict_calibration=False,
+    reject_ceiling=DEFAULT_REJECT_CEILING,
+    strict_health_check=False,
 ):
     """Stabilize a folder of frames using two user-selected anchor points.
 
@@ -801,6 +899,13 @@ def stabilize_folder(
     jpeg_quality : int  -- 0 for PNG lossless, 1-100 for JPEG
     debug_dir : str or None
     border_mode : str -- 'replicate', 'constant', or 'reflect'
+    strict_calibration : bool
+        If true, calibration instability aborts instead of falling back to
+        first-frame bootstrap.
+    reject_ceiling : float
+        R13 warning threshold for Pass-1 rejection pressure.
+    strict_health_check : bool
+        If true, an R13 warning becomes a HealthCheckError.
     """
     if anchor1 is None or anchor2 is None:
         raise ValueError("Se requieren dos puntos de referencia (anchor1 y anchor2).")
@@ -1061,6 +1166,40 @@ def stabilize_folder(
         theta_raw[i] = th
 
     splices = detect_splices(ncc1, ncc2, tx_raw, ty_raw, theta_raw, perf_spacing)
+    health_check = _evaluate_health_check(
+        n_frames=total,
+        motion_rejected_total=int(rej1.sum()) + int(rej2.sum()),
+        consensus_rejected_total=int(cons1.sum()) + int(cons2.sum()),
+        nan_filled_frames=int(nan_filled_mask.sum()),
+        reject_ceiling=reject_ceiling,
+        fallback_mode=calibration_status == "fallback",
+    )
+    if health_check["health_check"] == "warning":
+        if strict_health_check:
+            failure_summary = {
+                "total_frames": total,
+                "detected_both_frames": detected_count,
+                "failed_frames_both_required": failed_both_required,
+                "calibration_status": calibration_status,
+                "motion_rejected_frames_a1": int(rej1.sum()),
+                "motion_rejected_frames_a2": int(rej2.sum()),
+                "consensus_rejected_frames_a1": int(cons1.sum()),
+                "consensus_rejected_frames_a2": int(cons2.sum()),
+                "nan_filled_frames": int(nan_filled_mask.sum()),
+                "splice_count": max(0, len(splices) - 1),
+                "splice_indices": [int(s) for s in splices[1:]],
+                **health_check,
+            }
+            _write_stabilization_report(output_dir, failure_summary)
+            raise HealthCheckError(
+                numerator=health_check["health_check_numerator"],
+                denominator=health_check["health_check_denominator"],
+                rate=health_check["health_check_rate"],
+                dominant_mode=health_check["health_check_dominant_mode"],
+                ceiling=health_check["health_check_ceiling"],
+            )
+        log(_format_health_check_warning(health_check))
+
     tx_s, ty_s, theta_s, outlier_mask = smooth_trajectory(
         tx_raw,
         ty_raw,
@@ -1132,6 +1271,7 @@ def stabilize_folder(
         "consensus_rejected_frames_a1": int(cons1.sum()),
         "consensus_rejected_frames_a2": int(cons2.sum()),
         "nan_filled_frames": int(nan_filled_mask.sum()),
+        **health_check,
         "failed_detections_a1": int(fail1.sum()),
         "failed_detections_a2": int(fail2.sum()),
         "outlier_frames_replaced": outlier_count,

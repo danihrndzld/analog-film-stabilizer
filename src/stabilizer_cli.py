@@ -18,6 +18,7 @@ Output lines (one per line, each valid JSON):
     {"type": "log",      "msg":  "..."}
     {"type": "done",     "summary": {...}}
     {"type": "error",    "msg":  "..."}
+    {"type": "error",    "subtype": "health_check", "msg": "..."}
 
   Preview mode (single line):
     {"type": "preview", "previewPath": "..."|null}
@@ -33,6 +34,8 @@ import cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from perforation_stabilizer_app import (
+    DEFAULT_REJECT_CEILING,
+    HealthCheckError,
     stabilize_folder,
 )
 
@@ -69,8 +72,24 @@ def run_batch(args):
             debug_dir=args.debug_frames,
             border_mode=args.border_mode,
             strict_calibration=args.strict_calibration,
+            reject_ceiling=args.reject_ceiling,
+            strict_health_check=args.strict_health_check,
         )
         emit({"type": "done", "summary": summary})
+    except HealthCheckError as exc:
+        emit(
+            {
+                "type": "error",
+                "subtype": "health_check",
+                "msg": str(exc),
+                "numerator": exc.numerator,
+                "denominator": exc.denominator,
+                "rate": exc.rate,
+                "ceiling": exc.ceiling,
+                "dominant_mode": exc.dominant_mode,
+            }
+        )
+        sys.exit(1)
     except Exception as exc:
         emit({"type": "error", "msg": str(exc)})
         sys.exit(1)
@@ -138,6 +157,24 @@ def main():
             "single-frame bootstrap. Default off — Diego's workflow always "
             "produces some output, with a 'calibration-unverified' warning "
             "when calibration cannot stabilize."
+        ),
+    )
+    parser.add_argument(
+        "--reject-ceiling",
+        type=float,
+        default=DEFAULT_REJECT_CEILING,
+        help=(
+            "R13 Pass-1 rejection-rate warning ceiling. Default "
+            f"{DEFAULT_REJECT_CEILING:.2f}."
+        ),
+    )
+    parser.add_argument(
+        "--strict-health-check",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-abort when the R13 health check exceeds --reject-ceiling. "
+            "Default off; normal mode logs a warning and continues."
         ),
     )
 
