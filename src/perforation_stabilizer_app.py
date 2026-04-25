@@ -1,6 +1,8 @@
 import glob
 import os
 from collections import namedtuple
+from dataclasses import dataclass
+from typing import Any
 
 import cv2
 import numpy as np
@@ -28,6 +30,26 @@ _BORDER_MODES = {
 _FrameOutcome = namedtuple(
     "_FrameOutcome", "pt ambiguous motion_rejected ranked predicted"
 )
+
+
+@dataclass
+class TrackPassResult:
+    """Per-frame tracking outputs for a single anchor's pass.
+
+    Phase A fields only. ``consensus_rejected`` is initialized to all-False
+    here and populated by the consensus-gate stage (Unit 5). Phase B will
+    extend this dataclass with ``pass1_ncc_at_pos`` when same-window-size
+    NCC comparison ships (Unit 10); deferred until that consumer exists to
+    avoid dead-field drift if R14 ships Phase A only.
+    """
+
+    positions: list[tuple[float, float] | None]
+    nccs: np.ndarray  # float64, NaN where no candidate
+    ambiguous_mask: np.ndarray  # bool
+    motion_rejected: np.ndarray  # bool
+    consensus_rejected: np.ndarray  # bool, populated in Unit 5
+    failed_mask: np.ndarray  # bool
+    outcomes: list[Any]  # list[_FrameOutcome | None]
 
 
 # ── Template matching alignment ──────────────────────────────────────────────
@@ -551,23 +573,32 @@ def _track_anchor_pass(
     perf_spacing,
     log,
     label,
+    calibration=None,
 ):
     """Run per-frame tracking for a single anchor across all frames.
 
-    Returns four parallel lists of length ``len(files)``:
+    Returns a ``TrackPassResult`` dataclass with parallel arrays of length
+    ``len(files)``:
       - positions: (x, y) tuples or None (None = ambiguous/rejected/failed)
       - nccs: top-candidate NCC (or NaN when no candidate)
-      - ambiguous_flags: bool per frame
-      - motion_rejected_flags: bool per frame
+      - ambiguous_mask: bool per frame
+      - motion_rejected: bool per frame (predictor-distance gate)
+      - consensus_rejected: bool per frame, all-False here (populated by
+        Unit 5's R4 consensus check, which runs after both anchor passes)
+      - failed_mask: bool per frame (frame unreadable or no candidates)
       - outcomes: the raw _FrameOutcome (for debug drawing)
+
+    ``calibration`` is reserved for downstream consumers (Unit 5/8 will
+    consume it for R4 gates and R13 health-check inputs); it is currently
+    accepted but unused by the tracking loop itself.
     """
     n = len(files)
-    positions = [None] * n
+    positions: list[tuple[float, float] | None] = [None] * n
     nccs = np.full(n, np.nan, dtype=np.float64)
     amb = np.zeros(n, dtype=bool)
     rej = np.zeros(n, dtype=bool)
     fail = np.zeros(n, dtype=bool)
-    outcomes = [None] * n
+    outcomes: list[Any] = [None] * n
 
     for i, f in enumerate(files):
         frame = cv2.imread(f)
@@ -599,7 +630,15 @@ def _track_anchor_pass(
         else:
             fail[i] = True
 
-    return positions, nccs, amb, rej, fail, outcomes
+    return TrackPassResult(
+        positions=positions,
+        nccs=nccs,
+        ambiguous_mask=amb,
+        motion_rejected=rej,
+        consensus_rejected=np.zeros(n, dtype=bool),
+        failed_mask=fail,
+        outcomes=outcomes,
+    )
 
 
 def stabilize_folder(
@@ -705,7 +744,7 @@ def stabilize_folder(
 
     # ── Phase 2: Per-anchor tracking passes ──
     log("Fase 2a: rastreando anclaje 1...")
-    pos1, ncc1, amb1, rej1, fail1, out1 = _track_anchor_pass(
+    result1 = _track_anchor_pass(
         files,
         template1,
         anchor1_in_tpl,
@@ -716,7 +755,7 @@ def stabilize_folder(
         "a1",
     )
     log("Fase 2b: rastreando anclaje 2...")
-    pos2, ncc2, amb2, rej2, fail2, out2 = _track_anchor_pass(
+    result2 = _track_anchor_pass(
         files,
         template2,
         anchor2_in_tpl,
@@ -725,6 +764,27 @@ def stabilize_folder(
         perf_spacing,
         log,
         "a2",
+    )
+
+    # Bind to local names matching the prior tuple shape so downstream
+    # logic (debug pass, summary, smoothing inputs) reads naturally.
+    # Unit 5 will introduce result1.consensus_rejected / cons1; Unit 8
+    # will use the same masks for the R13 health-check denominator.
+    pos1, ncc1, amb1, rej1, fail1, out1 = (
+        result1.positions,
+        result1.nccs,
+        result1.ambiguous_mask,
+        result1.motion_rejected,
+        result1.failed_mask,
+        result1.outcomes,
+    )
+    pos2, ncc2, amb2, rej2, fail2, out2 = (
+        result2.positions,
+        result2.nccs,
+        result2.ambiguous_mask,
+        result2.motion_rejected,
+        result2.failed_mask,
+        result2.outcomes,
     )
 
     # Debug frames: save when either anchor failed on this frame.
