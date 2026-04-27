@@ -44,7 +44,7 @@ jobs:
       - name: Build arm64 binary
         run: |
           python3 -m venv /tmp/venv-arm64
-          /tmp/venv-arm64/bin/pip install pyinstaller opencv-python-headless numpy
+          /tmp/venv-arm64/bin/pip install pyinstaller opencv-python-headless numpy scipy
           /tmp/venv-arm64/bin/python -m PyInstaller --onefile --name stabilizer_arm64 \
             --distpath dist-py \
             --workpath /tmp/pyinstaller-arm64 \
@@ -55,12 +55,32 @@ jobs:
         run: |
           arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
             -m venv /tmp/venv-x64
-          arch -x86_64 /tmp/venv-x64/bin/pip install pyinstaller opencv-python-headless numpy
+          arch -x86_64 /tmp/venv-x64/bin/pip install pyinstaller opencv-python-headless numpy scipy
           arch -x86_64 /tmp/venv-x64/bin/python -m PyInstaller --onefile --name stabilizer_x64 \
             --distpath dist-py \
             --workpath /tmp/pyinstaller-x64 \
             --specpath /tmp \
             src/stabilizer_cli.py
+
+      - name: Verify binary CLI contracts
+        run: |
+          check_contract() {
+            local label="$1"
+            local help_output="$2"
+
+            echo "$help_output" | grep -- '--anchor1-x' >/dev/null
+            echo "$help_output" | grep -- '--anchor1-y' >/dev/null
+            echo "$help_output" | grep -- '--anchor2-x' >/dev/null
+            echo "$help_output" | grep -- '--anchor2-y' >/dev/null
+
+            if echo "$help_output" | grep -Eq '(^|[[:space:]])--anchor-x([,[:space:]]|$)'; then
+              echo "$label still exposes legacy --anchor-x"
+              exit 1
+            fi
+          }
+
+          check_contract "stabilizer_arm64" "$(dist-py/stabilizer_arm64 --help 2>&1)"
+          check_contract "stabilizer_x64" "$(arch -x86_64 dist-py/stabilizer_x64 --help 2>&1)"
 
       - uses: actions/upload-artifact@v4
         with:
