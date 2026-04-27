@@ -154,6 +154,25 @@ class TestRunCalibration:
             # 22 - 3 = 19 < 20 floor → None
             assert state is None
 
+    def test_template_spacing_recovery_counts_useful_samples(self, monkeypatch):
+        import perforation_stabilizer_app as app
+
+        monkeypatch.setattr(app, "_detect_perf_spacing", lambda *_args, **_kw: None)
+
+        with tempfile.TemporaryDirectory() as td:
+            files = _make_calibration_batch(td, n=30)
+            state = run_calibration(
+                files,
+                _perf_centroid(0.5),
+                _perf_centroid(0.2),
+                n_samples=30,
+                log=lambda m: None,
+            )
+
+            assert state is not None
+            assert state.effective_n == 30
+            assert state.perf_spacing == pytest.approx(300.0, abs=5.0)
+
 
 class TestCalibrationStability:
     """Stability-driven fallback: damaged batches return None."""
@@ -209,7 +228,9 @@ class TestStabilizeFolderCalibrationIntegration:
     and run-completion, not pixel content.
     """
 
-    def _drive_stabilize_folder(self, n_frames, *, strict=False):
+    def _drive_stabilize_folder(
+        self, n_frames, *, strict=False, frame_factory=_tri_frame
+    ):
         from perforation_stabilizer_app import stabilize_folder
 
         with tempfile.TemporaryDirectory() as td:
@@ -217,7 +238,7 @@ class TestStabilizeFolderCalibrationIntegration:
             out = os.path.join(td, "output")
             os.makedirs(inp, exist_ok=True)
             for i in range(n_frames):
-                _write_frame(os.path.join(inp, f"frame_{i:04d}.jpg"), _tri_frame())
+                _write_frame(os.path.join(inp, f"frame_{i:04d}.jpg"), frame_factory())
             return stabilize_folder(
                 input_dir=inp,
                 output_dir=out,
@@ -246,9 +267,31 @@ class TestStabilizeFolderCalibrationIntegration:
         # Pipeline still produced output.
         assert summary["total_frames"] == 5
 
+    def test_fallback_path_recovers_when_contour_spacing_fails(self, monkeypatch):
+        import perforation_stabilizer_app as app
+
+        monkeypatch.setattr(app, "_detect_perf_spacing", lambda *_args, **_kw: None)
+
+        summary = self._drive_stabilize_folder(n_frames=5)
+
+        assert summary["calibration_status"] == "fallback"
+        assert summary["total_frames"] == 5
+
     def test_strict_mode_aborts_on_calibration_failure(self):
         with pytest.raises(RuntimeError, match="strict-calibration"):
             self._drive_stabilize_folder(n_frames=5, strict=True)
+
+    def test_unrecoverable_bootstrap_spacing_still_raises(self, monkeypatch):
+        import perforation_stabilizer_app as app
+
+        monkeypatch.setattr(app, "_detect_perf_spacing", lambda *_args, **_kw: None)
+        monkeypatch.setattr(app, "_template_perf_spacing", lambda *_args, **_kw: None)
+        monkeypatch.setattr(
+            app, "_infer_spacing_from_anchor_pair", lambda *_args, **_kw: None
+        )
+
+        with pytest.raises(RuntimeError, match="bootstrap también"):
+            self._drive_stabilize_folder(n_frames=5)
 
 
 class TestCalibrationLogging:

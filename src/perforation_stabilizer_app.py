@@ -497,6 +497,185 @@ def _detect_perf_spacing(frame, anchor, search_radius=None):
     return median_delta
 
 
+def _spacing_from_y_centers(centers_y, min_spacing, *, min_intervals=2):
+    """Return median repeated Y spacing from candidate centres, or None."""
+    if not centers_y:
+        return None
+
+    min_spacing = float(min_spacing)
+    dedupe_gap = max(5.0, min_spacing * 0.25)
+    unique = []
+    for y in sorted(float(v) for v in centers_y if np.isfinite(v)):
+        if not unique or abs(y - unique[-1]) > dedupe_gap:
+            unique.append(y)
+
+    if len(unique) < 2:
+        return None
+
+    deltas = np.diff(np.asarray(unique, dtype=np.float64))
+    plausible = deltas[deltas >= min_spacing]
+    if plausible.size < min_intervals:
+        return None
+
+    median_delta = float(np.median(plausible))
+    tolerance = max(20.0, median_delta * 0.25)
+    consistent = plausible[np.abs(plausible - median_delta) <= tolerance]
+    if consistent.size < min_intervals:
+        return None
+
+    return float(np.median(consistent))
+
+
+def _template_perf_spacing(
+    frame,
+    anchor,
+    template,
+    anchor_in_tpl,
+    *,
+    min_confidence=0.25,
+):
+    """Recover spacing by template-matching repeated perfs in a vertical strip."""
+    if template is None or anchor_in_tpl is None:
+        return None
+
+    h, w = frame.shape[:2]
+    cx, cy = anchor
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return None
+
+    th, tw = template.shape[:2]
+    if th <= 0 or tw <= 0 or th >= h or tw >= w:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    half_w = max(int(tw * 1.5), 80)
+    x0 = max(0, int(cx - half_w))
+    x1 = min(w, int(cx + half_w))
+    roi = gray[:, x0:x1]
+    if roi.shape[0] < th or roi.shape[1] < tw:
+        return None
+
+    candidates = _template_match_candidates(
+        roi,
+        template,
+        k=12,
+        suppression_radius=max(th, tw) // 2,
+        min_confidence=min_confidence,
+        anchor_in_tpl=anchor_in_tpl,
+    )
+    if not candidates:
+        return None
+
+    max_x_drift = max(tw * 0.75, 60.0)
+    centers_y = [
+        cy_full
+        for cx_roi, cy_full, _ncc in candidates
+        if abs((cx_roi + x0) - float(cx)) <= max_x_drift
+    ]
+
+    # Template height is roughly 2.5× perf height when auto-scaled, so
+    # 0.6× template height preserves _detect_perf_spacing's 1.5× perf-height
+    # lower bound without requiring contour bbox success.
+    min_spacing = max(40.0, th * 0.6)
+    return _spacing_from_y_centers(centers_y, min_spacing)
+
+
+def _infer_spacing_from_anchor_pair(
+    frame, anchor1, anchor2, template1=None, template2=None
+):
+    """Last-resort spacing estimate from two vertically separated anchors."""
+    x1, y1 = anchor1
+    x2, y2 = anchor2
+    if not all(np.isfinite(v) for v in (x1, y1, x2, y2)):
+        return None
+
+    dx = abs(float(x2) - float(x1))
+    dy = abs(float(y2) - float(y1))
+    if dy <= 0 or dy < max(80.0, dx * 2.0):
+        return None
+
+    h = frame.shape[0]
+    perf_heights = []
+    for anchor in (anchor1, anchor2):
+        bbox = _detect_perf_bbox(frame, anchor)
+        if bbox is None:
+            continue
+        _bw, bh = bbox
+        if 10 <= bh <= h * 0.20:
+            perf_heights.append(float(bh))
+
+    for template in (template1, template2):
+        if template is None:
+            continue
+        th = float(template.shape[0])
+        if 10 <= th <= h * 0.30:
+            # Auto-scaled template height is ~2.5× perf height.
+            perf_heights.append(th / 2.5)
+
+    if not perf_heights:
+        return None
+
+    perf_h = float(np.median(np.asarray(perf_heights, dtype=np.float64)))
+    min_spacing = max(40.0, 1.5 * perf_h)
+    max_intervals = min(12, int(dy // min_spacing))
+    if max_intervals < 1:
+        return None
+
+    expected_spacing = max(min_spacing, 3.0 * perf_h)
+    candidates = []
+    for intervals in range(1, max_intervals + 1):
+        spacing = dy / intervals
+        if spacing >= min_spacing:
+            candidates.append((abs(spacing - expected_spacing), spacing))
+
+    if not candidates:
+        return None
+
+    _score, spacing = min(candidates, key=lambda item: item[0])
+    return float(spacing)
+
+
+def _recover_perf_spacing(
+    frame,
+    anchor1,
+    anchor2,
+    *,
+    template1=None,
+    anchor1_in_tpl=None,
+    template2=None,
+    anchor2_in_tpl=None,
+    log=None,
+):
+    """Estimate perf spacing using contour, template, then anchor-pair fallback."""
+    for anchor in (anchor1, anchor2):
+        spacing = _detect_perf_spacing(frame, anchor)
+        if spacing is not None:
+            return float(spacing)
+
+    for label, anchor, template, anchor_in_tpl in (
+        ("anchor 1", anchor1, template1, anchor1_in_tpl),
+        ("anchor 2", anchor2, template2, anchor2_in_tpl),
+    ):
+        spacing = _template_perf_spacing(frame, anchor, template, anchor_in_tpl)
+        if spacing is not None:
+            if log:
+                log(f"Espaciado recuperado por template en {label}: {spacing:.0f}px.")
+            return float(spacing)
+
+    spacing = _infer_spacing_from_anchor_pair(
+        frame, anchor1, anchor2, template1, template2
+    )
+    if spacing is not None:
+        if log:
+            log(
+                "Espaciado estimado desde la separación entre anclajes: "
+                f"{spacing:.0f}px."
+            )
+        return float(spacing)
+
+    return None
+
+
 def _locate_anchor_in_frame(
     frame,
     template,
@@ -983,7 +1162,16 @@ def stabilize_folder(
                 f"No pude extraer plantilla 2 en ({anchor2[0]:.0f}, {anchor2[1]:.0f}). "
                 "Selecciona un punto con más contraste."
             )
-        perf_spacing = _detect_perf_spacing(first_frame, anchor1)
+        perf_spacing = _recover_perf_spacing(
+            first_frame,
+            anchor1,
+            anchor2,
+            template1=template1,
+            anchor1_in_tpl=anchor1_in_tpl,
+            template2=template2,
+            anchor2_in_tpl=anchor2_in_tpl,
+            log=log,
+        )
         if perf_spacing is None:
             raise RuntimeError(
                 "Calibración falló y bootstrap también: no pude detectar "

@@ -94,8 +94,10 @@ if [[ "$X64_REBUILT" -eq 1 ]]; then
   echo "→ npm run build..." >> "$LOG"
   npm run build >> "$LOG" 2>&1
 else
-  echo "→ npm run build -- --arm64..." >> "$LOG"
-  npm run build -- --arm64 >> "$LOG" 2>&1
+  echo "→ npm run build (arm64 only)..." >> "$LOG"
+  ARM64_CONFIG="/tmp/perfstab-electron-builder-arm64.json"
+  node -e 'const fs=require("fs"); const pkg=require("./package.json"); const cfg=JSON.parse(JSON.stringify(pkg.build)); cfg.mac.target=[{target:"dmg", arch:["arm64"]}]; fs.writeFileSync(process.argv[1], JSON.stringify(cfg));' "$ARM64_CONFIG" >> "$LOG" 2>&1
+  npx electron-builder --mac --config "$ARM64_CONFIG" >> "$LOG" 2>&1
 fi
 
 echo "✓ Build complete. DMGs in $REPO/dist/" >> "$LOG"

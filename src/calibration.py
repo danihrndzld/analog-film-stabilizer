@@ -28,7 +28,7 @@ import numpy as np
 
 from perforation_stabilizer_app import (
     _build_perforation_template,
-    _detect_perf_spacing,
+    _recover_perf_spacing,
     _template_match_candidates,
 )
 
@@ -179,13 +179,18 @@ def run_calibration(
             log(f"Calibración: no pude abrir frame {i} (saltando)")
             continue
 
-        # Spacing is detected once per frame using anchor1's vertical strip
-        # (the strip needs ≥3 perforations to be reliable; centred on the
-        # anchor that's closest to the middle of the frame, this is the
-        # canonical location). NCC is measured per-anchor.
-        spacing = _detect_perf_spacing(frame, anchor1)
-        if spacing is None:
-            spacing = _detect_perf_spacing(frame, anchor2)
+        # Spacing is detected once per frame. The primary contour detector
+        # needs ≥3 visible bright contours; when exposure defeats that, fall
+        # back to the same templates that tracking will use.
+        spacing = _recover_perf_spacing(
+            frame,
+            anchor1,
+            anchor2,
+            template1=template_a1,
+            anchor1_in_tpl=anchor1_in_tpl,
+            template2=template_a2,
+            anchor2_in_tpl=anchor2_in_tpl,
+        )
         if spacing is None:
             continue
 

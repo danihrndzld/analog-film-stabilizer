@@ -30,6 +30,7 @@ from perforation_stabilizer_app import (
     _locate_anchor_in_frame,
     _MotionPredictor,
     _rank_candidates,
+    _recover_perf_spacing,
     _template_match_candidates,
     stabilize_folder,
 )
@@ -494,6 +495,63 @@ class TestRankingAndAmbiguity:
         assert spacing is None
 
 
+class TestRecoverPerfSpacing:
+    def test_contour_spacing_remains_primary(self):
+        frame = _tri_frame()
+
+        spacing = _recover_perf_spacing(frame, _tri_anchor(), _tri_anchor2())
+
+        assert spacing == pytest.approx(300.0, abs=5.0)
+
+    def test_template_spacing_recovers_when_contour_spacing_fails(self, monkeypatch):
+        import perforation_stabilizer_app as app
+
+        frame = _tri_frame()
+        anchor1 = _tri_anchor()
+        anchor2 = _tri_anchor2()
+        template1, anchor1_in_tpl = _build_perforation_template(frame, anchor1)
+        template2, anchor2_in_tpl = _build_perforation_template(frame, anchor2)
+
+        monkeypatch.setattr(app, "_detect_perf_spacing", lambda *_args, **_kw: None)
+
+        spacing = _recover_perf_spacing(
+            frame,
+            anchor1,
+            anchor2,
+            template1=template1,
+            anchor1_in_tpl=anchor1_in_tpl,
+            template2=template2,
+            anchor2_in_tpl=anchor2_in_tpl,
+        )
+
+        assert spacing == pytest.approx(300.0, abs=5.0)
+
+    def test_anchor_pair_spacing_recovers_when_templates_are_unavailable(
+        self, monkeypatch
+    ):
+        import perforation_stabilizer_app as app
+
+        frame = make_frame([0.1, 0.35, 0.6, 0.85], frame_h=1200)
+        anchor1 = _perf_centroid(0.1, frame_h=1200)
+        anchor2 = _perf_centroid(0.85, frame_h=1200)
+
+        monkeypatch.setattr(app, "_detect_perf_spacing", lambda *_args, **_kw: None)
+
+        spacing = _recover_perf_spacing(frame, anchor1, anchor2)
+
+        assert spacing == pytest.approx(300.0, abs=5.0)
+
+    def test_non_finite_anchor_returns_none(self, monkeypatch):
+        import perforation_stabilizer_app as app
+
+        frame = _tri_frame()
+        monkeypatch.setattr(app, "_detect_perf_spacing", lambda *_args, **_kw: None)
+
+        spacing = _recover_perf_spacing(frame, (float("nan"), 1.0), _tri_anchor2())
+
+        assert spacing is None
+
+
 # ── _locate_anchor_in_frame integration ──────────────────────────────────────
 
 
@@ -626,8 +684,12 @@ class TestAnchorWorkflow:
         ):
             stabilize_folder(inp, out, (100.0, 200.0), (100.0, 700.0), jpeg_quality=95)
 
-    def test_stabilize_raises_when_perf_spacing_undetectable(self):
-        """Two-perforation frame: templates succeed but spacing returns None → raise."""
+    def test_stabilize_raises_when_perf_spacing_unrecoverable(self, monkeypatch):
+        """Templates can succeed, but stabilization still aborts if spacing cannot."""
+        import perforation_stabilizer_app as app
+
+        monkeypatch.setattr(app, "_recover_perf_spacing", lambda *_args, **_kw: None)
+
         with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             _write_frame(os.path.join(inp, "frame.jpg"), make_frame([0.3, 0.7]))
             with pytest.raises(RuntimeError, match="espaciado"):
