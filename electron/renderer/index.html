@@ -131,17 +131,14 @@
         <div class="preview-header">
           <span class="preview-label">Referencia de estabilización</span>
           <span class="preview-status" id="previewStatus">Analizando…</span>
-          <div class="preview-actions">
-            <button class="btn-secondary btn-secondary--sm" id="previewRefreshBtn" type="button">Actualizar</button>
-            <button class="btn-secondary btn-secondary--sm preview-reset-btn" id="previewResetBtn" type="button" hidden>Restablecer</button>
-          </div>
         </div>
         <div class="preview-img-wrap" id="previewImgWrap">
           <img class="preview-img" id="previewImg"
                alt="Vista previa de detección de perforación en primer frame">
           <div class="anchor-dot" id="anchorDot" hidden aria-hidden="true"></div>
+          <div class="selection-rect" id="selectionRect" hidden></div>
         </div>
-        <p class="preview-hint">Haz clic en la imagen para ajustar el punto de referencia manualmente</p>
+        <p class="preview-hint">Haz clic y arrastra para seleccionar el área de referencia</p>
       </section>
 
       <!-- Advanced params -->

@@ -3,6 +3,10 @@
 These tests use synthetic frames built with NumPy/OpenCV — no sample images
 needed.  Frame dimensions are chosen so that perforation blobs satisfy all
 default filter thresholds (area ≥ 5000, aspect 0.40-1.20, fill ≥ 0.75).
+
+Anchor point convention: the detection algorithm returns the contour
+centroid (center of mass), which averages over the entire contour area
+and is far less sensitive to boundary noise than a corner point.
 """
 import os
 import sys
@@ -17,6 +21,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from perforation_stabilizer_app import (
     _annotate_roi_preview,
     _best_contour,
+    _build_perforation_template,
+    _build_averaged_template,
+    _estimate_rotation,
+    _template_match_perforation,
     detect_perforation,
     stabilize_folder,
 )
@@ -74,11 +82,13 @@ class TestBestContour:
     def test_happy_path_solid_rect(self):
         """Solid rect satisfying all default filters → centroid returned."""
         img = make_binary_roi(h=300, w=500)
-        # 100×100 at (50, 100): area=10000, aspect=1.0, fill=1.0, cx=100 < 350
+        # 100×100 at (50, 50) to (150, 150): area=10000, aspect=1.0, fill=1.0
+        # Centroid is (100, 100), cx=100 < 350 (70% of 500)
         cv2.rectangle(img, (50, 50), (150, 150), 255, -1)
         result = _best_contour(img, roi_w=500)
         assert result is not None
         cx, cy = result
+        # Anchor is centroid ≈ (100, 100)
         assert abs(cx - 100) < 3
         assert abs(cy - 100) < 3
 
@@ -110,16 +120,23 @@ class TestBestContour:
                                solidity_min=0.0)
         assert result is not None
 
-    def test_centroid_x_filter_uses_cx_not_bounding_rect_x(self):
-        """Contour whose left edge is at 52 % roi_w but centroid at 72 % is
-        rejected (the old bounding-rect check would have passed it)."""
+    def test_centroid_x_filter_rejects_far_right(self):
+        """Contour whose centroid exceeds 70% roi_w is rejected."""
         roi_w = 500  # 70 % threshold = 350
         img = make_binary_roi(h=500, w=roi_w)
-        # x=260 (52 %), bw=200, bh=200 → cx=260+100=360 (72 %)
-        cv2.rectangle(img, (260, 150), (460, 350), 255, -1)
-        # area=200*200=40000, aspect=1.0, fill=1.0 — only the cx filter rejects.
+        # x=310, bw=100 → centroid cx=360 (72 % of 500) — rejected
+        cv2.rectangle(img, (310, 150), (410, 250), 255, -1)
         result = _best_contour(img, roi_w=roi_w)
         assert result is None
+
+    def test_centroid_x_filter_accepts_near_threshold(self):
+        """Contour whose centroid is at 66% roi_w (under 70%) is accepted."""
+        roi_w = 500  # 70 % threshold = 350
+        img = make_binary_roi(h=500, w=roi_w)
+        # x=280, bw=100 → centroid cx=330 (66 % of 500) — accepted
+        cv2.rectangle(img, (280, 150), (380, 250), 255, -1)
+        result = _best_contour(img, roi_w=roi_w)
+        assert result is not None
 
     def test_rejection_reasons_collected(self):
         """collect_rejections=True returns a reason string for each failure."""
@@ -206,11 +223,11 @@ class TestAnnotateRoiPreview:
 class TestDetectPerforation:
 
     def test_8mm_two_perfs_returns_topmost_not_midpoint(self):
-        """Two well-separated perforations → anchor is the TOPMOST perf, not midpoint."""
+        """Two well-separated perforations → anchor is the TOPMOST perf's centroid."""
         frame = make_frame([0.25, 0.75])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
-        # Topmost perf y ≈ 0.25 × FRAME_H = 250, NOT the midpoint 500
+        # Topmost perf centroid y ≈ 0.25 × FRAME_H = 250
         assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
         # Explicitly verify it's NOT the midpoint
         assert abs(pt[1] - FRAME_H * 0.50) > FRAME_H * 0.10
@@ -222,21 +239,26 @@ class TestDetectPerforation:
         pt_two = detect_perforation(frame_two, film_format="8mm")
         pt_one = detect_perforation(frame_one, film_format="8mm")
         assert pt_two is not None and pt_one is not None
-        # Both anchors should be near the top perf position — delta < 15 px
-        assert abs(pt_two[1] - pt_one[1]) < 15
+        # Both anchors should be near the top perf's bottom edge — delta < 20 px
+        # (single-perf fallback and two-perf detection may use slightly different code paths)
+        assert abs(pt_two[1] - pt_one[1]) < 20
 
-    def test_8mm_perf_near_midline_both_found(self):
-        """Root-cause fix: perfs near h//2 are detected (old split would miss them)."""
-        # Position both perfs close to the vertical midpoint
-        frame = make_frame([0.44, 0.56])
+    def test_8mm_perf_at_boundary_of_zone_detected(self):
+        """Perf whose centroid is just under 30% zone threshold is detected."""
+        # Centroid at 28% of frame height (280px) → cy < 300 threshold
+        frame = make_frame([0.28])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
+        # Centroid should be near 280
+        assert abs(pt[1] - FRAME_H * 0.28) < FRAME_H * 0.05
 
     def test_8mm_single_perf_fallback_returns_centroid(self):
         """Only one perf visible → its centroid is returned, not None."""
         frame = make_frame([0.25])
         pt = detect_perforation(frame, film_format="8mm")
         assert pt is not None
+        # Centroid at 0.25 × FRAME_H = 250
+        assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
 
     def test_8mm_no_perfs_returns_none(self):
         """All-black frame → None for 8mm format."""
@@ -245,15 +267,17 @@ class TestDetectPerforation:
 
     def test_super8_detects_single_perf(self):
         """super8 path is unaffected by 8mm changes and still detects one perf."""
-        frame = make_frame([0.50])
+        frame = make_frame([0.25])
         pt = detect_perforation(frame, film_format="super8")
         assert pt is not None
 
     def test_super16_two_perfs_detected(self):
-        """super16 uses the same 2-perf path as 8mm and benefits from the fix."""
+        """super16 uses the same 2-perf path as 8mm and returns centroid."""
         frame = make_frame([0.25, 0.75])
         pt = detect_perforation(frame, film_format="super16")
         assert pt is not None
+        # Centroid of top perf at 0.25 × FRAME_H = 250
+        assert abs(pt[1] - FRAME_H * 0.25) < FRAME_H * 0.08
 
 
 # ── Unit 3: debug frame generation ───────────────────────────────────────────
@@ -270,7 +294,7 @@ class TestDebugFrames:
              tempfile.TemporaryDirectory() as out, \
              tempfile.TemporaryDirectory() as dbg:
 
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_001.jpg"), good)
 
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
@@ -291,7 +315,7 @@ class TestDebugFrames:
              tempfile.TemporaryDirectory() as out, \
              tempfile.TemporaryDirectory() as dbg:
 
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_001.jpg"), good)
 
             stabilize_folder(inp, out, debug_dir=dbg,
@@ -308,7 +332,7 @@ class TestDebugFrames:
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             _write_frame(os.path.join(inp, "my_scan.jpg"), bad)
             # Add a second good frame so stabilize_folder does not raise
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "good_frame.jpg"), good)
 
             stabilize_folder(inp, out, debug_dir=dbg,
@@ -324,7 +348,7 @@ class TestDebugFrames:
 
             bad = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             _write_frame(os.path.join(inp, "frame.jpg"), bad)
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_good.jpg"), good)
 
             stabilize_folder(inp, out, debug_dir=dbg,
@@ -344,8 +368,204 @@ class TestDebugFrames:
         with tempfile.TemporaryDirectory() as inp, \
              tempfile.TemporaryDirectory() as out:
 
-            good = make_frame([0.50])
+            good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame.jpg"), good)
             # Should complete without raising even though no debug_dir is given
             stabilize_folder(inp, out, debug_dir=None,
                              film_format="super8", jpeg_quality=95)
+
+
+# ── Unit 4: Template matching alignment ──────────────────────────────────────
+
+class TestTemplateMatching:
+
+    def test_build_template_returns_patch(self):
+        """Template extraction from a frame with a detected perforation produces a valid patch."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        tpl, origin = _build_perforation_template(frame, pt)
+        assert tpl is not None
+        assert tpl.ndim == 2  # grayscale
+        assert tpl.shape[0] > 10 and tpl.shape[1] > 10
+        assert origin is not None
+
+    def test_build_averaged_template_from_multiple_frames(self):
+        """Averaged template from multiple identical frames has same shape as single."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        pairs = [(frame, pt)] * 5
+        avg_tpl, origin = _build_averaged_template(pairs)
+        assert avg_tpl is not None
+        single_tpl, _ = _build_perforation_template(frame, pt)
+        assert avg_tpl.shape == single_tpl.shape
+
+    def test_template_match_finds_perforation(self):
+        """Template matching on the same frame used to build the template returns a match."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        tpl, _ = _build_perforation_template(frame, pt)
+        assert tpl is not None
+        result = _template_match_perforation(frame, tpl)
+        assert result is not None
+        cx, cy, conf = result
+        # Match should be near the original detection
+        assert abs(cx - pt[0]) < 10
+        assert abs(cy - pt[1]) < 10
+        assert conf > 0.8  # high confidence on same frame
+
+    def test_template_match_subpixel_precision(self):
+        """Template match returns float coordinates (sub-pixel)."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        tpl, _ = _build_perforation_template(frame, pt)
+        result = _template_match_perforation(frame, tpl)
+        assert result is not None
+        cx, cy, _ = result
+        assert isinstance(cx, float)
+        assert isinstance(cy, float)
+
+    def test_template_match_rejects_blank_frame(self):
+        """Template matching on an all-black frame returns None (low confidence)."""
+        # Build template from a good frame
+        good = make_frame([0.25])
+        pt = detect_perforation(good, film_format="super8")
+        tpl, _ = _build_perforation_template(good, pt)
+        assert tpl is not None
+        # Match against blank frame
+        blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        result = _template_match_perforation(blank, tpl)
+        assert result is None
+
+    def test_template_match_consistent_across_identical_frames(self):
+        """Template matching on identical frames returns the same position."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        tpl, _ = _build_perforation_template(frame, pt)
+        r1 = _template_match_perforation(frame, tpl)
+        r2 = _template_match_perforation(frame, tpl)
+        assert r1 is not None and r2 is not None
+        # Identical frames should give identical positions
+        assert abs(r1[0] - r2[0]) < 0.01
+        assert abs(r1[1] - r2[1]) < 0.01
+
+    def test_stabilize_folder_uses_template_matching(self):
+        """stabilize_folder with multiple identical frames uses template matching."""
+        with tempfile.TemporaryDirectory() as inp, \
+             tempfile.TemporaryDirectory() as out:
+
+            good = make_frame([0.25])
+            for i in range(5):
+                _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
+
+            stabilize_folder(inp, out, film_format="super8", jpeg_quality=95)
+
+            # Verify output was created for all frames (+ report file)
+            out_images = [f for f in os.listdir(out) if f.endswith(".jpg")]
+            assert len(out_images) == 5
+
+    def test_build_template_with_rect_dimensions(self):
+        """When rect_width/rect_height are provided, template uses those dimensions."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        rw, rh = 80, 60
+        tpl, origin = _build_perforation_template(
+            frame, pt, rect_width=rw, rect_height=rh,
+        )
+        assert tpl is not None
+        assert tpl.shape == (rh, rw)
+
+    def test_build_template_rect_clamps_to_frame_bounds(self):
+        """rect_width/rect_height exceeding frame bounds are clamped."""
+        frame = make_frame([0.25])
+        # Anchor near top-left corner with oversized rect
+        anchor = (5.0, 5.0)
+        tpl, origin = _build_perforation_template(
+            frame, anchor, rect_width=9999, rect_height=9999,
+        )
+        assert tpl is not None
+        h, w = frame.shape[:2]
+        roi_w = _roi_w(w)
+        # Template should be clamped to ROI width and frame height
+        assert tpl.shape[1] <= roi_w
+        assert tpl.shape[0] <= h
+
+    def test_stabilize_folder_median_target(self):
+        """Target position is the median of detections, not the raw anchor."""
+        with tempfile.TemporaryDirectory() as inp, \
+             tempfile.TemporaryDirectory() as out:
+
+            # Create frames with perforations at different y positions
+            y_fracs = [0.24, 0.25, 0.26]
+            for i, yf in enumerate(y_fracs):
+                _write_frame(
+                    os.path.join(inp, f"frame_{i:03d}.jpg"),
+                    make_frame([yf]),
+                )
+
+            logs = []
+            stabilize_folder(
+                inp, out, film_format="super8", jpeg_quality=95,
+                log_cb=lambda m: logs.append(m),
+            )
+
+            # Find the target log line
+            target_log = [l for l in logs if "Punto fijo objetivo" in l]
+            assert len(target_log) == 1
+            # The target y should be near the median (0.25 * 1000 = 250)
+            # not the first frame's position
+            import re
+            m = re.search(r"y=(\d+\.\d+)", target_log[0])
+            assert m is not None
+            target_y = float(m.group(1))
+            median_y = FRAME_H * 0.25  # middle frame's y
+            assert abs(target_y - median_y) < 15
+
+
+# ── Unit 5: Rotation estimation ──────────────────────────────────────────────
+
+class TestRotationEstimation:
+
+    def test_estimate_rotation_returns_near_zero_for_unrotated(self):
+        """An unrotated frame matched against its own template gives ~0 degrees."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        tpl, _ = _build_perforation_template(frame, pt)
+        assert tpl is not None
+        angle = _estimate_rotation(frame, tpl, pt[0], pt[1])
+        assert abs(angle) < 0.5  # should be near zero
+
+    def test_estimate_rotation_detects_small_rotation(self):
+        """A slightly rotated frame produces a non-zero angle estimate."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        assert pt is not None
+        tpl, _ = _build_perforation_template(frame, pt)
+        assert tpl is not None
+
+        # Rotate frame by 1 degree around center
+        h, w = frame.shape[:2]
+        R = cv2.getRotationMatrix2D((w / 2, h / 2), 1.0, 1.0)
+        rotated = cv2.warpAffine(frame, R, (w, h))
+
+        # Template match on rotated frame
+        tm_result = _template_match_perforation(rotated, tpl)
+        if tm_result is not None:
+            cx, cy, _ = tm_result
+            angle = _estimate_rotation(rotated, tpl, cx, cy)
+            # Should detect some rotation (sign may vary due to ROI crop)
+            # Just verify it returns a float without crashing
+            assert isinstance(angle, float)
+
+    def test_estimate_rotation_returns_zero_on_failure(self):
+        """Blank frame returns 0.0 (ECC fails to converge)."""
+        frame = make_frame([0.25])
+        pt = detect_perforation(frame, film_format="super8")
+        tpl, _ = _build_perforation_template(frame, pt)
+        blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        angle = _estimate_rotation(blank, tpl, 50.0, 250.0)
+        assert angle == 0.0

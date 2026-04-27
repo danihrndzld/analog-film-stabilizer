@@ -708,29 +708,30 @@ html, body {
   white-space: nowrap;
 }
 
-.preview-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.btn-secondary--sm {
-  font-size: 11px;
-  padding: 4px 9px;
-}
 
 .preview-img-wrap {
-  display: inline-block;
   position: relative;
+  overflow: auto;
+  max-height: 400px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 3px;
 }
 
 .preview-img {
   display: block;
-  max-height: 220px;
+  max-height: 400px;
   width: auto;
   cursor: crosshair;
-  border-radius: 3px;
-  border: 1px solid var(--border);
+  transform-origin: 0 0;
+}
+
+.selection-rect {
+  position: absolute;
+  border: 2px solid var(--amber);
+  background: oklch(74% 0.14 68 / 0.15);
+  pointer-events: none;
+  z-index: 2;
 }
 
 .anchor-dot {
@@ -744,6 +745,7 @@ html, body {
   pointer-events: none;
   box-shadow: 0 0 0 1px var(--red);
 }
+
 
 .preview-hint {
   font-size: 10px;
