@@ -7,12 +7,14 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.4.4",
     "opencv-python>=4.13.0.92",
+    "scipy>=1.14.0",
 ]
 
 [project.optional-dependencies]
 headless = [
     "numpy>=2.4.4",
     "opencv-python-headless>=4.13.0.92",
+    "scipy>=1.14.0",
 ]
 
 [dependency-groups]

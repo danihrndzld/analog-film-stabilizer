@@ -3,17 +3,25 @@
 CLI backend for the Electron UI.
 Streams JSON-lines to stdout so Electron can consume progress and logs.
 
-Batch mode (default):
-  --input DIR --output DIR [--roi F] [--threshold N] [--smooth N]
-  [--quality N] [--film-format super8|8mm|super16] [--debug-frames DIR]
-  [--manual-anchor-x N --manual-anchor-y N]
-  [--rect-width N --rect-height N]
+Modes:
+  batch (default)
+    --input DIR --output DIR
+    --anchor1-x N --anchor1-y N --anchor2-x N --anchor2-y N
+    [--quality N] [--debug-frames DIR] [--border-mode STR]
+
+  preview
+    --frame-path FILE --preview-out FILE
 
 Output lines (one per line, each valid JSON):
-  {"type": "progress", "value": 0.0..1.0}
-  {"type": "log",      "msg":  "..."}
-  {"type": "done",     "summary": {...}}
-  {"type": "error",    "msg":  "..."}
+  Batch mode:
+    {"type": "progress", "value": 0.0..1.0}
+    {"type": "log",      "msg":  "..."}
+    {"type": "done",     "summary": {...}}
+    {"type": "error",    "msg":  "..."}
+    {"type": "error",    "subtype": "health_check", "msg": "..."}
+
+  Preview mode (single line):
+    {"type": "preview", "previewPath": "..."|null}
 """
 
 import argparse
@@ -21,39 +29,67 @@ import json
 import os
 import sys
 
+import cv2
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from perforation_stabilizer_app import stabilize_folder
+from perforation_stabilizer_app import (
+    DEFAULT_REJECT_CEILING,
+    HealthCheckError,
+    stabilize_folder,
+)
 
 
 def emit(obj):
     print(json.dumps(obj, ensure_ascii=False), flush=True)
 
 
+def run_preview(args):
+    """Save a preview JPEG of the first frame for the UI."""
+    frame = cv2.imread(args.frame_path)
+    if frame is None:
+        emit({"type": "preview", "previewPath": None})
+        return
+
+    cv2.imwrite(args.preview_out, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    emit({"type": "preview", "previewPath": args.preview_out})
+
+
 def run_batch(args):
     """Run the full stabilisation batch."""
-    manual_anchor = None
-    if args.manual_anchor_x is not None and args.manual_anchor_y is not None:
-        manual_anchor = (args.manual_anchor_x, args.manual_anchor_y)
+    anchor1 = (args.anchor1_x, args.anchor1_y)
+    anchor2 = (args.anchor2_x, args.anchor2_y)
 
     try:
         summary = stabilize_folder(
             input_dir=args.input,
             output_dir=args.output,
+            anchor1=anchor1,
+            anchor2=anchor2,
             progress_cb=lambda v: emit({"type": "progress", "value": v}),
             log_cb=lambda m: emit({"type": "log", "msg": m}),
-            roi_ratio=args.roi,
-            threshold=args.threshold,
-            smooth_radius=args.smooth,
             jpeg_quality=args.quality,
-            film_format=args.film_format,
             debug_dir=args.debug_frames,
-            manual_anchor=manual_anchor,
             border_mode=args.border_mode,
-            rect_width=args.rect_width,
-            rect_height=args.rect_height,
+            strict_calibration=args.strict_calibration,
+            reject_ceiling=args.reject_ceiling,
+            strict_health_check=args.strict_health_check,
         )
         emit({"type": "done", "summary": summary})
+    except HealthCheckError as exc:
+        emit(
+            {
+                "type": "error",
+                "subtype": "health_check",
+                "msg": str(exc),
+                "numerator": exc.numerator,
+                "denominator": exc.denominator,
+                "rate": exc.rate,
+                "ceiling": exc.ceiling,
+                "dominant_mode": exc.dominant_mode,
+            }
+        )
+        sys.exit(1)
     except Exception as exc:
         emit({"type": "error", "msg": str(exc)})
         sys.exit(1)
@@ -62,25 +98,40 @@ def run_batch(args):
 def main():
     parser = argparse.ArgumentParser(description="Perforation stabilizer CLI")
 
-    # ── Shared params ─────────────────────────────────────────────────────────
+    # ── Mode ──────────────────────────────────────────────────────────────────
     parser.add_argument(
-        "--roi", type=float, default=0.22, help="ROI fraction (default 0.22)"
-    )
-    parser.add_argument(
-        "--threshold", type=int, default=210, help="Brightness threshold (default 210)"
-    )
-    parser.add_argument(
-        "--film-format",
-        choices=["super8", "8mm", "super16"],
-        default="super8",
-        help="Film format: super8 (default), 8mm, super16",
+        "--mode",
+        choices=["batch", "preview"],
+        default="batch",
+        help="Operation mode: batch (default) or preview",
     )
 
     # ── Batch-mode params ─────────────────────────────────────────────────────
     parser.add_argument("--input", default=None, help="Input folder with frames")
     parser.add_argument("--output", default=None, help="Output folder")
     parser.add_argument(
-        "--smooth", type=int, default=9, help="Moving-average radius (default 9)"
+        "--anchor1-x",
+        type=float,
+        default=None,
+        help="First anchor X coordinate (required for batch)",
+    )
+    parser.add_argument(
+        "--anchor1-y",
+        type=float,
+        default=None,
+        help="First anchor Y coordinate (required for batch)",
+    )
+    parser.add_argument(
+        "--anchor2-x",
+        type=float,
+        default=None,
+        help="Second anchor X coordinate (required for batch)",
+    )
+    parser.add_argument(
+        "--anchor2-y",
+        type=float,
+        default=None,
+        help="Second anchor Y coordinate (required for batch)",
     )
     parser.add_argument(
         "--quality", type=int, default=95, help="JPEG quality 1-100, 0=PNG (default 95)"
@@ -92,47 +143,87 @@ def main():
         help="Optional folder for failed-frame debug JPEGs",
     )
     parser.add_argument(
-        "--manual-anchor-x",
-        type=float,
-        default=None,
-        help="Override target anchor X (skips median computation)",
-    )
-    parser.add_argument(
-        "--manual-anchor-y",
-        type=float,
-        default=None,
-        help="Override target anchor Y (skips median computation)",
-    )
-    parser.add_argument(
         "--border-mode",
         choices=["replicate", "constant", "reflect"],
         default="replicate",
         help="Border fill mode for warpAffine (default: replicate)",
     )
     parser.add_argument(
-        "--rect-width",
-        type=float,
-        default=None,
-        help="Template rectangle width in pixels",
+        "--strict-calibration",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-abort on calibration failure instead of falling back to "
+            "single-frame bootstrap. Default off — Diego's workflow always "
+            "produces some output, with a 'calibration-unverified' warning "
+            "when calibration cannot stabilize."
+        ),
     )
     parser.add_argument(
-        "--rect-height",
+        "--reject-ceiling",
         type=float,
-        default=None,
-        help="Template rectangle height in pixels",
+        default=DEFAULT_REJECT_CEILING,
+        help=(
+            "R13 Pass-1 rejection-rate warning ceiling. Default "
+            f"{DEFAULT_REJECT_CEILING:.2f}."
+        ),
+    )
+    parser.add_argument(
+        "--strict-health-check",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-abort when the R13 health check exceeds --reject-ceiling. "
+            "Default off; normal mode logs a warning and continues."
+        ),
+    )
+
+    # ── Preview-mode params ───────────────────────────────────────────────────
+    parser.add_argument(
+        "--frame-path", default=None, help="Path to single frame for preview mode"
+    )
+    parser.add_argument(
+        "--preview-out", default=None, help="Output path for preview JPEG"
     )
 
     args = parser.parse_args()
 
-    if not args.input or not args.output:
-        emit(
-            {
-                "type": "error",
-                "msg": "--input and --output are required",
-            }
-        )
-        sys.exit(1)
-    run_batch(args)
+    if args.mode == "preview":
+        if not args.frame_path or not args.preview_out:
+            emit(
+                {
+                    "type": "error",
+                    "msg": "--frame-path and --preview-out are required in preview mode",
+                }
+            )
+            sys.exit(1)
+        run_preview(args)
+    else:
+        if not args.input or not args.output:
+            emit(
+                {
+                    "type": "error",
+                    "msg": "--input and --output are required in batch mode",
+                }
+            )
+            sys.exit(1)
+        if (
+            args.anchor1_x is None
+            or args.anchor1_y is None
+            or args.anchor2_x is None
+            or args.anchor2_y is None
+        ):
+            emit(
+                {
+                    "type": "error",
+                    "msg": (
+                        "--anchor1-x, --anchor1-y, --anchor2-x and --anchor2-y "
+                        "are required in batch mode"
+                    ),
+                }
+            )
+            sys.exit(1)
+        run_batch(args)
 
 
 if __name__ == "__main__":

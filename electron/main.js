@@ -124,43 +124,41 @@ ipcMain.handle('start-process', (event, opts) => {
     const binaryName = process.arch === 'arm64' ? 'stabilizer_arm64' : 'stabilizer_x64';
     executable = path.join(process.resourcesPath, binaryName);
     args = [
-      '--input',       opts.input,
-      '--output',      opts.output,
-      '--roi',         String(opts.roi),
-      '--threshold',   String(opts.threshold),
-      '--smooth',      String(opts.smooth),
-      '--quality',     String(opts.quality),
-      '--film-format', String(opts.filmFormat || 'super8'),
+      '--input',     opts.input,
+      '--output',    opts.output,
+      '--anchor1-x', String(opts.anchor1X),
+      '--anchor1-y', String(opts.anchor1Y),
+      '--anchor2-x', String(opts.anchor2X),
+      '--anchor2-y', String(opts.anchor2Y),
+      '--quality',   String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
-    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
-      args.push('--manual-anchor-x', String(opts.manualAnchorX),
-                '--manual-anchor-y', String(opts.manualAnchorY));
+    if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
+    if (opts.strictCalibration) args.push('--strict-calibration');
+    if (opts.rejectCeiling !== undefined && opts.rejectCeiling !== null && opts.rejectCeiling !== '') {
+      args.push('--reject-ceiling', String(opts.rejectCeiling));
     }
-    if (opts.borderMode)  args.push('--border-mode', String(opts.borderMode));
-    if (opts.rectWidth  != null) args.push('--rect-width',  String(opts.rectWidth));
-    if (opts.rectHeight != null) args.push('--rect-height', String(opts.rectHeight));
+    if (opts.strictHealthCheck) args.push('--strict-health-check');
   } else {
     const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
     executable = 'python3';
     args = [
       scriptPath,
-      '--input',       opts.input,
-      '--output',      opts.output,
-      '--roi',         String(opts.roi),
-      '--threshold',   String(opts.threshold),
-      '--smooth',      String(opts.smooth),
-      '--quality',     String(opts.quality),
-      '--film-format', String(opts.filmFormat || 'super8'),
+      '--input',     opts.input,
+      '--output',    opts.output,
+      '--anchor1-x', String(opts.anchor1X),
+      '--anchor1-y', String(opts.anchor1Y),
+      '--anchor2-x', String(opts.anchor2X),
+      '--anchor2-y', String(opts.anchor2Y),
+      '--quality',   String(opts.quality),
     ];
     if (opts.debugFrames) args.push('--debug-frames', opts.debugFrames);
-    if (opts.manualAnchorX != null && opts.manualAnchorY != null) {
-      args.push('--manual-anchor-x', String(opts.manualAnchorX),
-                '--manual-anchor-y', String(opts.manualAnchorY));
+    if (opts.borderMode) args.push('--border-mode', String(opts.borderMode));
+    if (opts.strictCalibration) args.push('--strict-calibration');
+    if (opts.rejectCeiling !== undefined && opts.rejectCeiling !== null && opts.rejectCeiling !== '') {
+      args.push('--reject-ceiling', String(opts.rejectCeiling));
     }
-    if (opts.borderMode)  args.push('--border-mode', String(opts.borderMode));
-    if (opts.rectWidth  != null) args.push('--rect-width',  String(opts.rectWidth));
-    if (opts.rectHeight != null) args.push('--rect-height', String(opts.rectHeight));
+    if (opts.strictHealthCheck) args.push('--strict-health-check');
   }
 
   pyProcess = spawn(executable, args);
@@ -231,6 +229,52 @@ ipcMain.handle('cancel-process', () => {
     pyProcess.kill('SIGTERM');
     pyProcess = null;
   }
+});
+
+// ── IPC: Single-frame preview ─────────────────────────────────────────────────
+// Runs --mode preview on one frame; returns { previewPath }.
+ipcMain.handle('preview-frame', (event, opts) => {
+  const previewOut = path.join(os.tmpdir(), 'stabilizer_preview.jpg');
+
+  let executable, args;
+  if (app.isPackaged) {
+    const binaryName = process.arch === 'arm64' ? 'stabilizer_arm64' : 'stabilizer_x64';
+    executable = path.join(process.resourcesPath, binaryName);
+    args = [
+      '--mode',        'preview',
+      '--frame-path',  opts.framePath,
+      '--preview-out', previewOut,
+    ];
+  } else {
+    const scriptPath = path.join(__dirname, '..', 'src', 'stabilizer_cli.py');
+    executable = 'python3';
+    args = [
+      scriptPath,
+      '--mode',        'preview',
+      '--frame-path',  opts.framePath,
+      '--preview-out', previewOut,
+    ];
+  }
+
+  return new Promise((resolve) => {
+    let stdout = '';
+    const proc = spawn(executable, args);
+    proc.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+    proc.on('error', (err) => {
+      resolve({ previewPath: null, error: err.message });
+    });
+    proc.on('close', () => {
+      try {
+        const line = stdout.trim().split('\n').find(l => l.trim());
+        const msg  = JSON.parse(line);
+        resolve({
+          previewPath: msg.previewPath ?? null,
+        });
+      } catch {
+        resolve({ previewPath: null, error: 'Failed to parse preview result' });
+      }
+    });
+  });
 });
 
 // ── IPC: First image file in a folder ────────────────────────────────────────

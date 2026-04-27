@@ -37,6 +37,7 @@ venv/
 # PyInstaller
 build/
 !electron/build/
+dist-py/
 dist/
 *.spec
 
