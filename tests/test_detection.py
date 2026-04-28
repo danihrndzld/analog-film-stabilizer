@@ -4,6 +4,7 @@ These tests use synthetic frames built with NumPy/OpenCV — no sample images
 needed.  The user provides an anchor point (x, y) on the first frame, and
 template matching tracks that point across all frames.
 """
+
 import os
 import sys
 import tempfile
@@ -14,19 +15,21 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import perforation_stabilizer_app as app
 from perforation_stabilizer_app import (
-    _MotionPredictor,
     _build_perforation_template,
     _build_rotation_template,
     _detect_perf_bbox,
     _detect_perf_spacing,
     _estimate_rotation,
     _extract_top_k_peaks,
+    _MotionPredictor,
     _rank_candidates,
     _template_match_candidates,
     _template_match_perforation,
     stabilize_folder,
 )
+from registration_stabilizer import RegistrationResult, affine_from_components
 
 # ── Synthetic frame helpers ────────────────────────────────────────────────────
 
@@ -36,8 +39,9 @@ PERF_W = 70
 PERF_H = 100
 
 
-def make_frame(perf_y_fracs, frame_h=FRAME_H, frame_w=FRAME_W,
-               perf_w=PERF_W, perf_h=PERF_H):
+def make_frame(
+    perf_y_fracs, frame_h=FRAME_H, frame_w=FRAME_W, perf_w=PERF_W, perf_h=PERF_H
+):
     """Return a BGR frame with bright rectangles at given vertical positions.
 
     The rectangles are placed near the left side, horizontally centred in
@@ -68,10 +72,18 @@ def _perf_centroid(y_frac=0.25, frame_h=FRAME_H, frame_w=FRAME_W):
     return (float(cx), float(cy))
 
 
+def _bright_centroid(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    ys, xs = np.where(gray > 180)
+    if len(xs) == 0:
+        return None
+    return (float(np.mean(xs)), float(np.mean(ys)))
+
+
 # ── Template building ──────────────────────────────────────────────────────────
 
-class TestBuildTemplate:
 
+class TestBuildTemplate:
     def test_build_template_returns_patch(self):
         """Template extraction from a frame with a known anchor produces a valid patch."""
         frame = make_frame([0.25])
@@ -109,8 +121,8 @@ class TestBuildTemplate:
 
 # ── Contextual template (auto-scaled, asymmetric vertical) ────────────────────
 
-class TestContextualTemplate:
 
+class TestContextualTemplate:
     def test_auto_scaled_template_is_taller_than_wide(self):
         """Default (patch_radius=None) produces a vertical-asymmetric template."""
         frame = make_frame([0.25])
@@ -118,9 +130,7 @@ class TestContextualTemplate:
         tpl, _ = _build_perforation_template(frame, anchor)
         assert tpl is not None
         # Height should be clearly greater than width (captures perf + context)
-        assert tpl.shape[0] > tpl.shape[1], (
-            f"Expected tall template, got {tpl.shape}"
-        )
+        assert tpl.shape[0] > tpl.shape[1], f"Expected tall template, got {tpl.shape}"
 
     def test_auto_scaled_template_is_larger_than_perf(self):
         """Template height spans clearly more than the perforation itself."""
@@ -170,8 +180,8 @@ class TestContextualTemplate:
 
 # ── Template matching ──────────────────────────────────────────────────────────
 
-class TestTemplateMatching:
 
+class TestTemplateMatching:
     def test_template_match_finds_anchor(self):
         """Template matching on the same frame used to build the template returns a match."""
         frame = make_frame([0.25])
@@ -241,8 +251,8 @@ class TestTemplateMatching:
 
 # ── Multi-peak (top-K) matching ───────────────────────────────────────────────
 
-class TestMultiPeakMatching:
 
+class TestMultiPeakMatching:
     def test_extract_top_k_finds_multiple_peaks(self):
         """A synthetic correlation map with 3 clear peaks yields them ranked."""
         corr = np.zeros((200, 200), dtype=np.float32)
@@ -267,10 +277,7 @@ class TestMultiPeakMatching:
 
         peaks = _extract_top_k_peaks(corr, k=5, suppression_radius=20)
         # The suppressed second-peak should NOT appear as a distinct entry
-        distinct_peaks = [
-            p for p in peaks
-            if abs(p[0] - 50) > 1 or abs(p[1] - 50) > 1
-        ]
+        distinct_peaks = [p for p in peaks if abs(p[0] - 50) > 1 or abs(p[1] - 50) > 1]
         # None of the returned "distinct" peaks should carry 0.85 --
         # it was suppressed because it fell inside the first peak's
         # neighbourhood.
@@ -285,19 +292,15 @@ class TestMultiPeakMatching:
         two_perf = make_frame([0.25, 0.75])
         gray = cv2.cvtColor(two_perf, cv2.COLOR_BGR2GRAY)
 
-        candidates = _template_match_candidates(
-            gray, tpl, k=5, min_confidence=0.3
-        )
+        candidates = _template_match_candidates(gray, tpl, k=5, min_confidence=0.3)
         # Need at least two high-confidence candidates near the two perfs
         upper = _perf_centroid(0.25)
         lower = _perf_centroid(0.75)
         matched_upper = any(
-            abs(c[0] - upper[0]) < 15 and abs(c[1] - upper[1]) < 15
-            for c in candidates
+            abs(c[0] - upper[0]) < 15 and abs(c[1] - upper[1]) < 15 for c in candidates
         )
         matched_lower = any(
-            abs(c[0] - lower[0]) < 15 and abs(c[1] - lower[1]) < 15
-            for c in candidates
+            abs(c[0] - lower[0]) < 15 and abs(c[1] - lower[1]) < 15 for c in candidates
         )
         assert matched_upper and matched_lower, (
             f"Expected both perfs in candidates, got: {candidates}"
@@ -309,16 +312,14 @@ class TestMultiPeakMatching:
         anchor = _perf_centroid(0.25)
         tpl, _ = _build_perforation_template(frame, anchor)
         blank = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-        candidates = _template_match_candidates(
-            blank, tpl, k=5, min_confidence=0.5
-        )
+        candidates = _template_match_candidates(blank, tpl, k=5, min_confidence=0.5)
         assert candidates == []
 
 
 # ── Ranking and ambiguity ─────────────────────────────────────────────────────
 
-class TestRankingAndAmbiguity:
 
+class TestRankingAndAmbiguity:
     def test_motion_predictor_smooths_delta(self):
         p = _MotionPredictor(initial_pos=(100.0, 200.0), alpha=0.5)
         p.update((110.0, 200.0))  # delta (10, 0)
@@ -379,8 +380,8 @@ class TestRankingAndAmbiguity:
 
 # ── Rotation estimation ───────────────────────────────────────────────────────
 
-class TestRotationEstimation:
 
+class TestRotationEstimation:
     def test_estimate_rotation_returns_near_zero_for_unrotated(self):
         """An unrotated frame matched against its own template gives ~0 degrees."""
         frame = make_frame([0.25])
@@ -444,13 +445,11 @@ class TestRotationEstimation:
 
 # ── Anchor-based stabilization workflow ────────────────────────────────────────
 
-class TestAnchorWorkflow:
 
+class TestAnchorWorkflow:
     def test_stabilize_with_anchor_produces_output(self):
         """stabilize_folder with anchor and 5 identical frames produces 5 output images."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = make_frame([0.25])
             for i in range(5):
                 _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
@@ -463,9 +462,7 @@ class TestAnchorWorkflow:
 
     def test_stabilize_produces_report(self):
         """stabilize_folder writes a stabilization_report.txt."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_001.jpg"), good)
 
@@ -474,15 +471,14 @@ class TestAnchorWorkflow:
 
             report = os.path.join(out, "stabilization_report.txt")
             assert os.path.exists(report)
-            content = open(report).read()
+            with open(report) as f:
+                content = f.read()
             assert "total_frames" in content
             assert "film_format" not in content  # removed
 
     def test_stabilize_single_frame(self):
         """Single-frame input produces one output image."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = make_frame([0.25])
             _write_frame(os.path.join(inp, "single.jpg"), good)
 
@@ -494,9 +490,7 @@ class TestAnchorWorkflow:
 
     def test_stabilize_raises_without_anchor(self):
         """stabilize_folder raises ValueError when anchor is None."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame.jpg"), good)
 
@@ -505,18 +499,14 @@ class TestAnchorWorkflow:
 
     def test_stabilize_no_images_raises(self):
         """Empty folder raises RuntimeError."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             anchor = (100.0, 200.0)
             with pytest.raises(RuntimeError, match="imágenes"):
                 stabilize_folder(inp, out, anchor=anchor, jpeg_quality=95)
 
     def test_stabilize_identical_frames_zero_drift(self):
         """Template match on identical frames returns positions close to anchor (dx/dy ~ 0)."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = make_frame([0.25])
             for i in range(3):
                 _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), good)
@@ -529,17 +519,226 @@ class TestAnchorWorkflow:
             assert abs(summary["target_x"] - anchor[0]) < 1
             assert abs(summary["target_y"] - anchor[1]) < 1
 
+    def test_stabilize_translated_sequence_aligns_perforation(self):
+        """Registration-first stabilization reduces centroid variance across shifted frames."""
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
+            base = make_frame([0.25])
+            shifts = [(0, 0), (9, -5), (-7, 4), (5, 6)]
+            for i, (dx, dy) in enumerate(shifts):
+                shifted = cv2.warpAffine(
+                    base,
+                    np.float32([[1, 0, dx], [0, 1, dy]]),
+                    (FRAME_W, FRAME_H),
+                    borderMode=cv2.BORDER_CONSTANT,
+                )
+                _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), shifted)
+
+            anchor = _perf_centroid(0.25)
+            summary = stabilize_folder(
+                inp, out, anchor=anchor, smooth_radius=0, jpeg_quality=0
+            )
+
+            centroids = []
+            for i in range(len(shifts)):
+                stabilized = cv2.imread(os.path.join(out, f"frame_{i:03d}.png"))
+                centroid = _bright_centroid(stabilized)
+                assert centroid is not None
+                centroids.append(centroid)
+
+            xs = np.array([c[0] for c in centroids])
+            ys = np.array([c[1] for c in centroids])
+            assert np.std(xs) < 2.0
+            assert np.std(ys) < 2.0
+            assert summary["registration_success_frames"] >= len(shifts) - 1
+            assert summary["smooth_radius"] == 0
+
+    def test_stabilize_rejects_blank_reference_frame(self):
+        """A blank first frame should fail instead of reporting fake fallback success."""
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
+            blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+            _write_frame(os.path.join(inp, "frame_001.jpg"), blank)
+
+            with pytest.raises(RuntimeError, match="suficiente textura"):
+                stabilize_folder(inp, out, anchor=(100.0, 200.0), jpeg_quality=95)
+
+    def test_stabilize_rejects_non_finite_anchor_y(self):
+        """Both anchor coordinates must be finite and inside the first frame."""
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
+            good = make_frame([0.25])
+            _write_frame(os.path.join(inp, "frame_001.jpg"), good)
+
+            with pytest.raises(ValueError, match="anchor coordinates"):
+                stabilize_folder(
+                    inp, out, anchor=(100.0, float("nan")), jpeg_quality=95
+                )
+
+    def test_anchor_fallback_runs_when_registration_fails(self, monkeypatch):
+        """NCC fallback can stabilize frames when image registration rejects them."""
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
+            base = make_frame([0.25])
+            shifts = [(0, 0), (12, -5), (-9, 4), (6, 7)]
+            for i, (dx, dy) in enumerate(shifts):
+                shifted = cv2.warpAffine(
+                    base,
+                    np.float32([[1, 0, dx], [0, 1, dy]]),
+                    (FRAME_W, FRAME_H),
+                    borderMode=cv2.BORDER_CONSTANT,
+                )
+                _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), shifted)
+
+            def fail_registration(*_args, **_kwargs):
+                return RegistrationResult(
+                    False,
+                    np.float32([[1, 0, 0], [0, 1, 0]]),
+                    0.0,
+                    "failed",
+                    "forced",
+                )
+
+            monkeypatch.setattr(
+                app, "estimate_registration_transform", fail_registration
+            )
+
+            anchor = _perf_centroid(0.25)
+            summary = stabilize_folder(
+                inp, out, anchor=anchor, smooth_radius=0, jpeg_quality=0
+            )
+
+            centroids = []
+            for i in range(len(shifts)):
+                stabilized = cv2.imread(os.path.join(out, f"frame_{i:03d}.png"))
+                centroid = _bright_centroid(stabilized)
+                assert centroid is not None
+                centroids.append(centroid)
+
+            assert summary["registration_success_frames"] == 0
+            assert summary["anchor_fallback_frames"] == len(shifts)
+            assert summary["reused_transform_frames"] == 0
+            assert np.std([c[0] for c in centroids]) < 2.0
+            assert np.std([c[1] for c in centroids]) < 2.0
+
+    def test_registration_success_updates_anchor_fallback_predictor(self, monkeypatch):
+        """A registration-derived anchor position keeps later NCC fallback recoverable."""
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
+            base = make_frame([0.25])
+            shifts = [(0, 0), (260, 0), (260, 0)]
+            for i, (dx, dy) in enumerate(shifts):
+                shifted = cv2.warpAffine(
+                    base,
+                    np.float32([[1, 0, dx], [0, 1, dy]]),
+                    (FRAME_W, FRAME_H),
+                    borderMode=cv2.BORDER_CONSTANT,
+                )
+                _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), shifted)
+
+            calls = iter(
+                [
+                    RegistrationResult(
+                        True, affine_from_components(0, 0, 0), 1.0, "ecc"
+                    ),
+                    RegistrationResult(
+                        True, affine_from_components(-260, 0, 0), 1.0, "ecc"
+                    ),
+                    RegistrationResult(
+                        False,
+                        np.float32([[1, 0, 0], [0, 1, 0]]),
+                        0.0,
+                        "failed",
+                        "forced",
+                    ),
+                ]
+            )
+
+            monkeypatch.setattr(
+                app,
+                "estimate_registration_transform",
+                lambda *_args, **_kwargs: next(calls),
+            )
+
+            anchor = _perf_centroid(0.25)
+            summary = stabilize_folder(
+                inp, out, anchor=anchor, smooth_radius=0, jpeg_quality=0
+            )
+
+            assert summary["registration_success_frames"] == 2
+            assert summary["anchor_fallback_frames"] == 1
+            assert summary["reused_transform_frames"] == 0
+
+    def test_positive_smooth_radius_changes_warp_trajectory(self, monkeypatch):
+        """stabilize_folder uses smooth_radius when applying final frame warps."""
+        base = make_frame([0.25])
+
+        def run_with_radius(radius):
+            with (
+                tempfile.TemporaryDirectory() as inp,
+                tempfile.TemporaryDirectory() as out,
+            ):
+                for i in range(3):
+                    _write_frame(os.path.join(inp, f"frame_{i:03d}.jpg"), base)
+
+                results = iter(
+                    [
+                        RegistrationResult(
+                            True, affine_from_components(0, 0, 0), 1.0, "ecc"
+                        ),
+                        RegistrationResult(
+                            True, affine_from_components(30, 0, 0), 1.0, "ecc"
+                        ),
+                        RegistrationResult(
+                            True, affine_from_components(0, 0, 0), 1.0, "ecc"
+                        ),
+                    ]
+                )
+                monkeypatch.setattr(
+                    app,
+                    "estimate_registration_transform",
+                    lambda *_args, **_kwargs: next(results),
+                )
+
+                anchor = _perf_centroid(0.25)
+                stabilize_folder(
+                    inp, out, anchor=anchor, smooth_radius=radius, jpeg_quality=0
+                )
+                middle = cv2.imread(os.path.join(out, "frame_001.png"))
+                centroid = _bright_centroid(middle)
+                assert centroid is not None
+                return centroid
+
+        unsmoothed = run_with_radius(0)
+        smoothed = run_with_radius(1)
+
+        assert abs(unsmoothed[0] - smoothed[0]) > 5.0
+
+    def test_stabilize_report_includes_registration_metrics(self):
+        """The report records the new registration-first counters."""
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
+            good = make_frame([0.25])
+            _write_frame(os.path.join(inp, "frame_001.jpg"), good)
+
+            anchor = _perf_centroid(0.25)
+            summary = stabilize_folder(inp, out, anchor=anchor, jpeg_quality=95)
+
+            report = os.path.join(out, "stabilization_report.txt")
+            with open(report) as f:
+                content = f.read()
+            assert "registration_success_frames" in content
+            assert "phase_fallback_frames" in content
+            assert "registration_roi" in content
+            assert isinstance(summary["registration_roi"], dict)
+            assert summary["registration_roi"]["width"] > 0
+
 
 # ── Debug frames ───────────────────────────────────────────────────────────────
 
-class TestDebugFrames:
 
+class TestDebugFrames:
     def test_debug_jpeg_created_for_failed_frame(self):
         """Failed detection (all-black frame) produces a _debug.jpg when debug_dir is set."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out, \
-             tempfile.TemporaryDirectory() as dbg:
-
+        with (
+            tempfile.TemporaryDirectory() as inp,
+            tempfile.TemporaryDirectory() as out,
+            tempfile.TemporaryDirectory() as dbg,
+        ):
             good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_001.jpg"), good)
 
@@ -551,16 +750,16 @@ class TestDebugFrames:
 
             debug_files = os.listdir(dbg)
             assert any(
-                "frame_002" in f and f.endswith("_debug.jpg")
-                for f in debug_files
+                "frame_002" in f and f.endswith("_debug.jpg") for f in debug_files
             ), f"Expected debug file for frame_002, got: {debug_files}"
 
     def test_no_debug_file_for_successful_detection(self):
         """Successful detection produces no debug files."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out, \
-             tempfile.TemporaryDirectory() as dbg:
-
+        with (
+            tempfile.TemporaryDirectory() as inp,
+            tempfile.TemporaryDirectory() as out,
+            tempfile.TemporaryDirectory() as dbg,
+        ):
             good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame_001.jpg"), good)
 
@@ -571,9 +770,7 @@ class TestDebugFrames:
 
     def test_no_debug_dir_does_not_raise(self):
         """debug_dir=None produces no errors."""
-        with tempfile.TemporaryDirectory() as inp, \
-             tempfile.TemporaryDirectory() as out:
-
+        with tempfile.TemporaryDirectory() as inp, tempfile.TemporaryDirectory() as out:
             good = make_frame([0.25])
             _write_frame(os.path.join(inp, "frame.jpg"), good)
 

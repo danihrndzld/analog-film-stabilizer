@@ -91,13 +91,13 @@ def main():
         "--anchor-x",
         type=float,
         default=None,
-        help="Reference anchor X coordinate (required for batch)",
+        help="Reference film/perforation region X coordinate (required for batch)",
     )
     parser.add_argument(
         "--anchor-y",
         type=float,
         default=None,
-        help="Reference anchor Y coordinate (required for batch)",
+        help="Reference film/perforation region Y coordinate (required for batch)",
     )
     parser.add_argument(
         "--smooth", type=int, default=9, help="Moving-average radius (default 9)"

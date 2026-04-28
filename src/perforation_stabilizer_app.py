@@ -4,6 +4,22 @@ import os
 import cv2
 import numpy as np
 
+from registration_stabilizer import (
+    affine_from_components,
+    components_from_matrix,
+    crop_roi,
+    detect_transform_breaks,
+    estimate_registration_transform,
+    identity_matrix,
+    local_matrix_to_frame,
+    preprocess_registration_image,
+    resize_for_registration,
+    scale_alignment_matrix,
+    select_registration_roi,
+    smooth_transform_components,
+    texture_score,
+)
+
 VALID_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
 
 
@@ -42,6 +58,8 @@ _BORDER_MODES = {
     "constant": cv2.BORDER_CONSTANT,
     "reflect": cv2.BORDER_REFLECT_101,
 }
+
+_MIN_REGISTRATION_TEXTURE = 0.01
 
 
 # ── Template matching alignment ──────────────────────────────────────────────
@@ -688,6 +706,49 @@ def _estimate_rotation(gray, template, cx, cy):
         return None
 
 
+def _apply_affine_to_point(matrix, point):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    x, y = point
+    return (
+        float(matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2]),
+        float(matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2]),
+    )
+
+
+def _anchor_position_from_alignment(matrix, target):
+    inverse = cv2.invertAffineTransform(np.asarray(matrix, dtype=np.float32))
+    return _apply_affine_to_point(inverse, target)
+
+
+def _registration_anchor_is_plausible(
+    frame,
+    matrix,
+    target,
+    reference_bbox,
+    perf_spacing,
+):
+    h, w = frame.shape[:2]
+    anchor_pos = _anchor_position_from_alignment(matrix, target)
+    ax, ay = anchor_pos
+    if not (np.isfinite(ax) and np.isfinite(ay)):
+        return False, anchor_pos
+    if ax < 0 or ay < 0 or ax >= w or ay >= h:
+        return False, anchor_pos
+
+    search_radius = int(max(80, min(perf_spacing * 0.35, min(h, w) * 0.25)))
+    bbox = _detect_perf_bbox(frame, anchor_pos, search_radius=search_radius)
+    if bbox is None:
+        return False, anchor_pos
+    if reference_bbox is None:
+        return True, anchor_pos
+
+    ref_w, ref_h = reference_bbox
+    cur_w, cur_h = bbox
+    width_ratio = cur_w / max(ref_w, 1)
+    height_ratio = cur_h / max(ref_h, 1)
+    return 0.45 <= width_ratio <= 2.2 and 0.45 <= height_ratio <= 2.2, anchor_pos
+
+
 def stabilize_folder(
     input_dir,
     output_dir,
@@ -699,7 +760,7 @@ def stabilize_folder(
     debug_dir=None,
     border_mode="replicate",
 ):
-    """Stabilize a folder of frames using the user-selected anchor point.
+    """Stabilize a folder of frames using a registration strip around an anchor.
 
     Parameters
     ----------
@@ -708,14 +769,15 @@ def stabilize_folder(
     output_dir : str
         Path to folder where stabilized frames will be written.
     anchor : tuple(float, float)
-        User-selected (x, y) reference point in frame coordinates.
-        This is the point that will be locked to a fixed position.
+        User-selected (x, y) reference point in frame coordinates. The point seeds
+        the film/perforation strip used for registration and remains the fallback
+        tracker target.
     progress_cb : callable or None
         Called with a float 0.0-1.0 indicating progress.
     log_cb : callable or None
         Called with log message strings.
     smooth_radius : int
-        Moving average window half-size for position smoothing.
+        Moving average window half-size for transform trajectory smoothing.
     jpeg_quality : int
         JPEG quality 1-100, or 0 for PNG lossless output.
     debug_dir : str or None
@@ -734,7 +796,6 @@ def stabilize_folder(
     if debug_dir:
         os.makedirs(debug_dir, exist_ok=True)
 
-    points = []
     failures = 0
     total = len(files)
 
@@ -744,8 +805,8 @@ def stabilize_folder(
 
     log(f"Encontré {total} imágenes.")
 
-    # ── Phase 1: Build reference template from user-selected anchor ──
-    log("Fase 1: construyendo plantilla de referencia...")
+    # ── Phase 1: Build reference registration strip and fallback tracker ──
+    log("Fase 1: preparando registro por franja de película...")
 
     first_frame = None
     for f in files:
@@ -756,27 +817,45 @@ def stabilize_folder(
     if first_frame is None:
         raise RuntimeError("No pude abrir ningún frame de la carpeta.")
 
-    template, _ = _build_perforation_template(first_frame, anchor)
-    if template is None:
+    perf_bbox = _detect_perf_bbox(first_frame, anchor)
+    registration_roi = select_registration_roi(first_frame.shape, anchor, perf_bbox)
+    reference_strip = crop_roi(first_frame, registration_roi)
+    reference_strip_small, registration_scale = resize_for_registration(
+        reference_strip, max_dim=900
+    )
+    reference_processed = preprocess_registration_image(reference_strip_small)
+    if (
+        reference_processed.size == 0
+        or texture_score(reference_processed) < _MIN_REGISTRATION_TEXTURE
+    ):
         raise RuntimeError(
-            f"No pude extraer plantilla en el punto ({anchor[0]:.0f}, {anchor[1]:.0f}). "
-            "Selecciona un punto con más contraste."
+            "No pude construir una franja de registro con suficiente textura."
         )
 
+    rx0, ry0, rx1, ry1 = registration_roi
     log(
-        f"Plantilla construida ({template.shape[1]}×{template.shape[0]} px) "
-        f"en ({anchor[0]:.0f}, {anchor[1]:.0f})"
+        "Franja de registro: "
+        f"x={rx0}:{rx1}, y={ry0}:{ry1} ({rx1 - rx0}×{ry1 - ry0} px, "
+        f"escala {registration_scale:.3f})."
     )
 
-    # The user's anchor IS the stabilization target
+    template, _ = _build_perforation_template(first_frame, anchor)
+    if template is not None and float(np.std(template)) < 1e-6:
+        template = None
+    if template is None:
+        log("No pude extraer plantilla NCC; el fallback por punto queda desactivado.")
+    else:
+        log(
+            f"Plantilla fallback NCC ({template.shape[1]}×{template.shape[0]} px) "
+            f"en ({anchor[0]:.0f}, {anchor[1]:.0f})"
+        )
+
+    # The user's anchor remains the fallback stabilization target.
     target_x = float(anchor[0])
     target_y = float(anchor[1])
 
-    # ── Phase 2: Detect anchor position in all frames via template matching ──
-    log("Fase 2: alineando frames...")
-
-    # Detect inter-perforation spacing from first frame — used to calibrate
-    # the search radius and to feed the ranking / ambiguity detector.
+    # Detect inter-perforation spacing from first frame. The registration path
+    # does not require it, but the fallback tracker and discontinuity gate use it.
     perf_spacing = _detect_perf_spacing(first_frame, anchor)
     if perf_spacing is None:
         # Fallback: use frame-height heuristic (Regular 8mm has ~1 perf per frame)
@@ -787,69 +866,152 @@ def stabilize_folder(
     else:
         log(f"Espaciado entre perforaciones detectado: {perf_spacing:.0f}px.")
 
-    # Search radius: generous enough to find the perf even after real jitter,
-    # but < perf_spacing so NCC cannot reach the neighbouring perforation.
-    search_radius = int(max(120, min(perf_spacing * 0.45, perf_spacing - 40)))
+    # Search radius for fallback NCC: generous enough to find the perf after
+    # real jitter, but below the spacing when possible.
+    search_radius = int(max(120, min(perf_spacing * 0.45, max(80, perf_spacing - 40))))
     predictor = _MotionPredictor(initial_pos=anchor, alpha=0.6)
     ambiguous_count = 0
     motion_rejected_count = 0
 
+    tx_values = []
+    ty_values = []
+    theta_values = []
+    valid_mask = []
+    registration_confidences = []
+    registration_success_count = 0
+    ecc_count = 0
+    phase_fallback_count = 0
+    anchor_fallback_count = 0
+    reused_transform_count = 0
+    previous_matrix = identity_matrix()
+
+    log("Fase 2: estimando trayectoria por registro de imagen...")
+
     for i, f in enumerate(files, 1):
         frame = cv2.imread(f)
+        matrix = None
+        method = "failed"
+        confidence = 0.0
+        ranked = []
+        predicted = None
+
         if frame is None:
-            points.append(None)
             failures += 1
+            valid_mask.append(False)
+            tx, ty, theta = components_from_matrix(previous_matrix)
+            tx_values.append(tx)
+            ty_values.append(ty)
+            theta_values.append(theta)
             log(f"No pude abrir: {os.path.basename(f)}")
         else:
-            pt = None
-            ambiguous = False
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            predicted = predictor.predict()
-            candidates = _template_match_candidates(
-                gray,
-                template,
-                k=5,
-                search_center=predicted,
-                search_radius=search_radius,
-                min_confidence=0.3,
+            current_strip = crop_roi(frame, registration_roi)
+            current_strip_small, _ = resize_for_registration(current_strip, max_dim=900)
+            current_processed = preprocess_registration_image(current_strip_small)
+            max_translation = max(
+                80.0,
+                min(perf_spacing * 0.45, max(frame.shape[:2]) * 0.20),
             )
-            ranked, ambiguous = _rank_candidates(candidates, predicted, perf_spacing)
-            if ambiguous:
-                ambiguous_count += 1
-                log(f"Ambigüedad en {os.path.basename(f)}; uso predicción previa.")
-                motion_rejected_count += 1
-            elif ranked:
-                cx, cy, _ncc, _combined = ranked[0]
-                pt = (cx, cy)
-                predictor.update(pt)
+            result = estimate_registration_transform(
+                reference_processed,
+                current_processed,
+                max_translation=max_translation * registration_scale,
+            )
 
-            points.append(pt)
-            if pt is None:
+            if result.ok:
+                local_matrix = scale_alignment_matrix(result.matrix, registration_scale)
+                matrix = local_matrix_to_frame(local_matrix, registration_roi)
+                plausible, registered_anchor = _registration_anchor_is_plausible(
+                    frame,
+                    matrix,
+                    (target_x, target_y),
+                    perf_bbox,
+                    perf_spacing,
+                )
+                if plausible:
+                    method = result.method
+                    confidence = result.confidence
+                    previous_matrix = matrix.copy()
+                    predictor.update(registered_anchor)
+                    registration_success_count += 1
+                    registration_confidences.append(confidence)
+                    if method == "ecc":
+                        ecc_count += 1
+                    elif method == "phase":
+                        phase_fallback_count += 1
+                else:
+                    matrix = None
+            if matrix is None and template is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                predicted = predictor.predict()
+                candidates = _template_match_candidates(
+                    gray,
+                    template,
+                    k=5,
+                    search_center=predicted,
+                    search_radius=search_radius,
+                    min_confidence=0.3,
+                )
+                ranked, ambiguous = _rank_candidates(
+                    candidates, predicted, perf_spacing
+                )
+                if ambiguous:
+                    ambiguous_count += 1
+                    motion_rejected_count += 1
+                    log(
+                        f"Registro falló y NCC ambiguo en {os.path.basename(f)}; "
+                        "reuso trayectoria previa."
+                    )
+                elif ranked:
+                    cx, cy, _ncc, _combined = ranked[0]
+                    predictor.update((cx, cy))
+                    matrix = np.float32([[1, 0, target_x - cx], [0, 1, target_y - cy]])
+                    method = "anchor"
+                    confidence = float(_ncc)
+                    previous_matrix = matrix.copy()
+                    anchor_fallback_count += 1
+
+            if matrix is None:
+                matrix = previous_matrix.copy()
+                method = "reuse"
                 failures += 1
-                if not ambiguous:
-                    log(f"Sin detección: {os.path.basename(f)}")
-                # Save debug image if requested
-                if debug_dir:
-                    try:
-                        basename = (
-                            os.path.splitext(os.path.basename(f))[0] + "_debug.jpg"
+                reused_transform_count += 1
+                log(
+                    f"Registro sin confianza en {os.path.basename(f)}; "
+                    "reuso trayectoria previa."
+                )
+
+            tx, ty, theta = components_from_matrix(matrix)
+            tx_values.append(tx)
+            ty_values.append(ty)
+            theta_values.append(theta)
+            valid_mask.append(True)
+
+            if debug_dir and method == "reuse":
+                try:
+                    basename = os.path.splitext(os.path.basename(f))[0] + "_debug.jpg"
+                    debug_path = os.path.join(debug_dir, basename)
+                    dbg = frame.copy()
+                    cv2.rectangle(
+                        dbg,
+                        (registration_roi[0], registration_roi[1]),
+                        (registration_roi[2] - 1, registration_roi[3] - 1),
+                        (255, 0, 255),
+                        3,
+                    )
+                    for rank_idx, c in enumerate(ranked[:5]):
+                        cx_c, cy_c, ncc_c, _sc = c
+                        color = (0, 255, 0) if rank_idx == 0 else (0, 165, 255)
+                        cv2.circle(dbg, (int(cx_c), int(cy_c)), 20, color, 3)
+                        cv2.putText(
+                            dbg,
+                            f"#{rank_idx + 1} {ncc_c:.2f}",
+                            (int(cx_c) + 25, int(cy_c)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            color,
+                            2,
                         )
-                        debug_path = os.path.join(debug_dir, basename)
-                        dbg = frame.copy()
-                        for rank_idx, c in enumerate(ranked[:5]):
-                            cx_c, cy_c, ncc_c, _sc = c
-                            color = (0, 255, 0) if rank_idx == 0 else (0, 165, 255)
-                            cv2.circle(dbg, (int(cx_c), int(cy_c)), 20, color, 3)
-                            cv2.putText(
-                                dbg,
-                                f"#{rank_idx + 1} {ncc_c:.2f}",
-                                (int(cx_c) + 25, int(cy_c)),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.6,
-                                color,
-                                2,
-                            )
+                    if predicted is not None:
                         px_p, py_p = predicted
                         cv2.drawMarker(
                             dbg,
@@ -859,31 +1021,56 @@ def stabilize_folder(
                             30,
                             2,
                         )
-                        cv2.imwrite(debug_path, dbg, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    except Exception as exc:
-                        log(f"Debug image failed: {exc}")
+                    cv2.putText(
+                        dbg,
+                        "registration fallback/reuse",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (255, 0, 255),
+                        2,
+                    )
+                    cv2.imwrite(debug_path, dbg, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                except Exception as exc:
+                    log(f"Debug image failed: {exc}")
+
         if progress_cb:
             progress_cb(i / (total * 2))
 
-    log(f"Detección: {total - failures} exitosos, {failures} fallidos de {total}")
+    valid_count = registration_success_count + anchor_fallback_count
+    log(
+        "Registro: "
+        f"{registration_success_count} por imagen, "
+        f"{anchor_fallback_count} por fallback NCC, "
+        f"{reused_transform_count} reusados de {total}."
+    )
 
-    valid = [p for p in points if p is not None]
-    if not valid:
-        raise RuntimeError("No logré detectar la referencia en ningún frame.")
+    if valid_count == 0:
+        raise RuntimeError("No logré estimar movimiento confiable en ningún frame.")
 
     log(f"Punto fijo objetivo: x={target_x:.2f}, y={target_y:.2f}")
 
-    # Fill None positions (failed detections) by linear interpolation.
-    xs = np.array([p[0] if p is not None else np.nan for p in points], dtype=np.float32)
-    ys = np.array([p[1] if p is not None else np.nan for p in points], dtype=np.float32)
-    idx = np.arange(len(xs))
-    good_x = np.isfinite(xs)
-    good_y = np.isfinite(ys)
-    if np.any(good_x):
-        xs[~good_x] = np.interp(idx[~good_x], idx[good_x], xs[good_x])
-    if np.any(good_y):
-        ys[~good_y] = np.interp(idx[~good_y], idx[good_y], ys[good_y])
-    per_frame = list(zip(xs.tolist(), ys.tolist(), strict=True))
+    tx_arr = np.array(tx_values, dtype=np.float32)
+    ty_arr = np.array(ty_values, dtype=np.float32)
+    theta_arr = np.array(theta_values, dtype=np.float32)
+    valid_arr = np.array(valid_mask, dtype=bool)
+    breaks = detect_transform_breaks(
+        tx_arr,
+        ty_arr,
+        theta_arr,
+        valid_mask=valid_arr,
+        translation_threshold=max(80.0, perf_spacing * 0.75),
+        rotation_threshold=np.deg2rad(2.0),
+    )
+    smooth_radius = max(0, int(smooth_radius or 0))
+    tx_s, ty_s, theta_s = smooth_transform_components(
+        tx_arr,
+        ty_arr,
+        theta_arr,
+        radius=smooth_radius,
+        valid_mask=valid_arr,
+        break_indices=breaks,
+    )
 
     log("Segunda pasada: estabilizando y guardando...")
 
@@ -898,10 +1085,7 @@ def stabilize_folder(
             h, w = frame.shape[:2]
             if out_h is None:
                 out_h, out_w = h, w
-            pt = per_frame[i - 1]
-            dx = target_x - pt[0]
-            dy = target_y - pt[1]
-            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            M = affine_from_components(tx_s[i - 1], ty_s[i - 1], theta_s[i - 1])
             stabilized = cv2.warpAffine(
                 frame,
                 M,
@@ -923,11 +1107,31 @@ def stabilize_folder(
         if progress_cb:
             progress_cb((total + i) / (total * 2))
 
+    mean_confidence = (
+        float(np.mean(registration_confidences)) if registration_confidences else 0.0
+    )
+
     summary = {
         "total_frames": total,
         "failed_detections": failures,
         "ambiguous_frames": ambiguous_count,
         "motion_rejected_frames": motion_rejected_count,
+        "registration_success_frames": registration_success_count,
+        "ecc_frames": ecc_count,
+        "phase_fallback_frames": phase_fallback_count,
+        "anchor_fallback_frames": anchor_fallback_count,
+        "reused_transform_frames": reused_transform_count,
+        "mean_registration_confidence": round(mean_confidence, 4),
+        "registration_roi": {
+            "x0": int(rx0),
+            "y0": int(ry0),
+            "x1": int(rx1),
+            "y1": int(ry1),
+            "width": int(rx1 - rx0),
+            "height": int(ry1 - ry0),
+        },
+        "trajectory_segments": len(breaks),
+        "smooth_radius": smooth_radius,
         "perf_spacing_px": round(float(perf_spacing), 1),
         "search_radius_px": int(search_radius),
         "target_x": round(target_x, 3),

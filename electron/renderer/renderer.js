@@ -206,7 +206,7 @@ async function triggerPreview() {
     previewImg.src = 'file://' + result.previewPath + '?t=' + Date.now();
   }
 
-  previewStatusEl.textContent = 'Haz clic para seleccionar referencia';
+  previewStatusEl.textContent = 'Haz clic sobre borde o perforación';
 }
 
 // Click-to-set-anchor: map click position back to frame coordinates
@@ -224,7 +224,7 @@ previewImg.addEventListener('click', (e) => {
   anchorDot.hidden = false;
 
   previewStatusEl.textContent =
-    `Referencia: (${Math.round(frameX)}, ${Math.round(frameY)})`;
+    `Zona de registro: (${Math.round(frameX)}, ${Math.round(frameY)})`;
 
   updateRunButton();
 });
